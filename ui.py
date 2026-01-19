@@ -4,13 +4,12 @@ import json
 import shutil
 import random
 from typing import Optional
-
 from PySide6.QtWidgets import (
     QApplication, QMessageBox, QGridLayout, QCheckBox, QComboBox, QSpinBox,
     QHBoxLayout, QSizePolicy, QMainWindow, QStackedWidget, QWidget, QPushButton,
     QVBoxLayout, QLabel, QScrollArea, QFrame, QProgressBar, QFileDialog, QLineEdit
 )
-from PySide6.QtGui import QFont, QPixmap, QPainter, QTextOption
+from PySide6.QtGui import QFont, QPixmap, QPainter, QTextOption, QIcon
 from PySide6.QtCore import Qt, QTimer, QPropertyAnimation, QParallelAnimationGroup, QPoint, QEasingCurve, QRect
 
 try:
@@ -127,6 +126,10 @@ class MainWindow(QMainWindow):
             "count": 4,
             "max_count": 79
         }
+
+
+        self.reading_type = "kunyomi"
+        self.meaning_mode = "multiple_choice"
 
         # load/create persistence first so profile_data exists
         self.kanji_stats = {}
@@ -305,6 +308,27 @@ class MainWindow(QMainWindow):
         DrillMenuDrillCombo.addItems(["Meaning", "Reading"])
         DrillMenuDrillCombo.currentTextChanged.connect(self.filterdrill_changed)
         DrillMenuLayout.addWidget(DrillMenuDrillCombo)
+
+        self.DrillMenuMeaningModeCombo = QComboBox()
+        self.DrillMenuMeaningModeCombo.addItems(["Multiple Choice", "Writing"])
+        self.DrillMenuMeaningModeCombo.setCurrentIndex(0)
+        self.DrillMenuMeaningModeCombo.currentTextChanged.connect(self.meaningmode_changed)
+        DrillMenuLayout.addWidget(self.DrillMenuMeaningModeCombo)
+
+        # hide initially unless we are in Meaning drill
+        if self.drillFilters.get("drill", "Meaning") != "Meaning":
+            self.DrillMenuMeaningModeCombo.hide()
+
+        self.DrillMenuReadingTypeCombo = QComboBox()
+        self.DrillMenuReadingTypeCombo.addItems(["Kunyomi", "Onyomi"])
+        # default to Kunyomi
+        # internal value mapping: "Kunyomi" -> "kunyomi", "Onyomi" -> "onyomi"
+        self.DrillMenuReadingTypeCombo.setCurrentIndex(0)
+        self.DrillMenuReadingTypeCombo.currentTextChanged.connect(self.readingtype_changed)
+        DrillMenuLayout.addWidget(self.DrillMenuReadingTypeCombo)
+        # hide initially unless we are in Reading drill
+        if self.drillFilters.get("drill", "Meaning") != "Reading":
+            self.DrillMenuReadingTypeCombo.hide()
 
         DrillMenuCountLayout = QHBoxLayout()
         self.DrillMenuCountLabel = QLabel("Count: (total: " + str(self.drillFilters["max_count"]) + ")")
@@ -552,9 +576,16 @@ class MainWindow(QMainWindow):
             levels = self.drillFilters["wanikani_levels"]
 
         try:
+            # Note: getMaxCount signature in logic.py may vary, adjust accordingly
             self.drillFilters["max_count"] = getMaxCount(self.df_f, self.drillFilters["system"], levels, self.drillFilters["drill"])
         except TypeError:
-            self.drillFilters["max_count"] = getMaxCount(self.drillFilters["system"], levels, self.drillFilters["drill"])
+            # fallback if getMaxCount expects different args
+            try:
+                self.drillFilters["max_count"] = getMaxCount(self.drillFilters["system"], levels, self.drillFilters["drill"])
+            except Exception:
+                self.drillFilters["max_count"] = 0
+        except Exception:
+            self.drillFilters["max_count"] = 0
 
         self.drillFilters["max_count"] = int(self.drillFilters["max_count"] or 0)
         self.DrillMenuCountLabel.setText("Count: (total: " + str(self.drillFilters["max_count"]) + ")")
@@ -585,17 +616,44 @@ class MainWindow(QMainWindow):
             self.df_f = filterDataFrame(self.drillFilters["system"], self.drillFilters["jlpt_levels"], self.drillFilters["drill"])
         else:
             self.df_f = filterDataFrame(self.drillFilters["system"], self.drillFilters["wanikani_levels"], self.drillFilters["drill"])
-        self.drillFilters["max_count"] = getMaxCount(self.drillFilters["system"], self.drillFilters["jlpt_levels"], self.drillFilters["drill"])
+        try:
+            self.drillFilters["max_count"] = getMaxCount(self.drillFilters["system"], self.drillFilters["jlpt_levels"], self.drillFilters["drill"])
+        except Exception:
+            pass
         self.update_count_label()
 
     def filterdrill_changed(self, text):
         self.drillFilters["drill"] = text
+        # show/hide reading type combo
+        # show/hide reading type combo
+        if text == "Reading":
+            self.DrillMenuReadingTypeCombo.show()
+        else:
+            self.DrillMenuReadingTypeCombo.hide()
+
+        # show/hide meaning mode combo
+        if text == "Meaning":
+            self.DrillMenuMeaningModeCombo.show()
+        else:
+            self.DrillMenuMeaningModeCombo.hide()
+
         if self.drillFilters["system"] == "JLPT":
             self.df_f = filterDataFrame(self.drillFilters["system"], self.drillFilters["jlpt_levels"], self.drillFilters["drill"])
         else:
             self.df_f = filterDataFrame(self.drillFilters["system"], self.drillFilters["wanikani_levels"], self.drillFilters["drill"])
-        self.drillFilters["max_count"] = getMaxCount(self.drillFilters["system"], self.drillFilters["jlpt_levels"], self.drillFilters["drill"])
+        try:
+            self.drillFilters["max_count"] = getMaxCount(self.drillFilters["system"], self.drillFilters["jlpt_levels"], self.drillFilters["drill"])
+        except Exception:
+            pass
         self.update_count_label()
+
+    def readingtype_changed(self, text):
+        # map UI choice to internal value
+        val = "kunyomi" if text.lower().startswith("k") else "onyomi"
+        self.reading_type = val
+
+    def meaningmode_changed(self, text):
+        self.meaning_mode = "writing" if text.lower().startswith("w") else "multiple_choice"
 
     def filtercount_changed(self, value):
         self.drillFilters["count"] = max(4, int(value))
@@ -648,6 +706,183 @@ class MainWindow(QMainWindow):
                 nested = item.layout()
                 if nested:
                     self.clear_layout(nested)
+    def _contains_kanji(self, s: str) -> bool:
+        if not s:
+            return False
+        for ch in s:
+            code = ord(ch)
+            # CJK Unified Ideographs + Extension A + Compatibility Ideographs
+            if (0x4E00 <= code <= 0x9FFF) or (0x3400 <= code <= 0x4DBF) or (0xF900 <= code <= 0xFAFF):
+                return True
+        return False
+
+    def _answer_button_font_for_text(self, text: str) -> QFont:
+        f = QFont()
+        # Large for kanji answers (legibility similar to kanji prompt)
+        if self._contains_kanji(text):
+            f.setPointSize(44)
+        else:
+            f.setPointSize(14)
+        return f
+
+    # ---------------- question helpers (reading-safe) ----------------
+    def _pick_readings_text(self, row, is_jlpt, prefer):
+        """
+        Return a single DISPLAY string representing the FULL reading list
+        for the chosen type (kunyomi/onyomi). Falls back to the other type if empty.
+        Example: ["ばつ","ばち"] -> "ばつ, ばち"
+        Returns "" if none available.
+        """
+        if is_jlpt:
+            kun_field = "readings_kun"
+            on_field = "readings_on"
+        else:
+            kun_field = "wk_readings_kun"
+            on_field = "wk_readings_on"
+
+        first_field = kun_field if prefer == "kunyomi" else on_field
+        second_field = on_field if prefer == "kunyomi" else kun_field
+
+        def normalize_list(val):
+            if val is None:
+                return []
+            if isinstance(val, (list, tuple)):
+                items = [str(x).strip() for x in val if x is not None and str(x).strip()]
+                return items
+            # if it ever comes as a string, treat it as single reading
+            s = str(val).strip()
+            return [s] if s else []
+
+        def join_items(items):
+            return ", ".join(items) if items else ""
+
+        first_items = normalize_list(row.get(first_field))
+        if first_items:
+            return join_items(first_items)
+
+        second_items = normalize_list(row.get(second_field))
+        if second_items:
+            return join_items(second_items)
+
+        return ""
+
+    def _collect_reading_distractors(self, batch_df, is_jlpt, prefer, needed=3, exclude=None):
+        """
+        Return up to `needed` distinct non-empty reading LIST strings (joined),
+        using prefer as preference for field. exclude is a set of strings to avoid.
+        """
+        exclude = set(exclude or [])
+        candidates = []
+        for _, r in batch_df.iterrows():
+            rd = self._pick_readings_text(r, is_jlpt, prefer)
+            if rd and rd not in exclude:
+                candidates.append(rd)
+
+        # dedupe while keeping order
+        candidates = list(dict.fromkeys(candidates))
+        random.shuffle(candidates)
+        return candidates[:needed]
+    
+    def _normalize_meaning_list(self, val):
+        """
+        Return a clean list of meaning strings from either:
+        - list/tuple: ["tall", "expensive"]
+        - string: "tall, expensive"
+        """
+        if val is None:
+            return []
+        if isinstance(val, (list, tuple)):
+            items = [str(x).strip() for x in val if x is not None and str(x).strip()]
+            return items
+        s = str(val).strip()
+        if not s:
+            return []
+        # split common separators for stored strings
+        parts = [p.strip() for p in s.replace(";", ",").split(",")]
+        return [p for p in parts if p]
+
+    def _is_meaning_input_correct(self, user_text: str, meanings_list):
+        """
+        Accept:
+        - any single meaning
+        - any subset of meanings (1..n), any order
+        - not case sensitive
+        - supports "tall, expensive" and "expensive, tall"
+        """
+        if user_text is None:
+            return False
+
+        # normalize target meanings
+        targets = [m.strip().lower() for m in meanings_list if m and str(m).strip()]
+        targets = [t for t in targets if t]
+        if not targets:
+            return False
+
+        # normalize user input
+        raw = str(user_text).strip().lower()
+        if not raw:
+            return False
+
+        # Split ONLY on separators between meanings; keep internal spaces intact
+        user_parts = [p.strip() for p in raw.replace(";", ",").split(",")]
+        user_parts = [p for p in user_parts if p]
+
+        # If user typed one chunk, allow exact match to any meaning
+        if len(user_parts) == 1:
+            return user_parts[0] in targets
+
+        # If multiple chunks, accept if all provided are valid meanings (subset),
+        # regardless of order, and no extras beyond the target list.
+        target_set = set(targets)
+        user_set = set(user_parts)
+
+        # must be subset and non-empty
+        return bool(user_set) and user_set.issubset(target_set)
+    
+    def submit_meaning_written(self):
+        # must exist
+        edit = getattr(self, "meaning_input", None)
+        btn = getattr(self, "meaning_enter_btn", None)
+        if edit is None:
+            return
+
+        # disable immediately
+        try:
+            edit.setEnabled(False)
+        except Exception:
+            pass
+        if btn is not None:
+            try:
+                btn.setEnabled(False)
+            except Exception:
+                pass
+
+        user_text = edit.text()
+        expected_display = getattr(self, "correct_answer_text", "")
+
+        # determine correct
+        meanings_list = getattr(self, "_current_meanings_list", [])
+        is_correct = self._is_meaning_input_correct(user_text, meanings_list)
+
+        # stats/session logging
+        try:
+            kanji_key = str(self.currentRow.get("kanji"))
+        except Exception:
+            kanji_key = ""
+
+        self.session_results.append({
+            "kanji": kanji_key,
+            "given": user_text,
+            "expected": expected_display,
+            "correct": bool(is_correct)
+        })
+
+        self.update_stats_and_profile(kanji_key, bool(is_correct))
+
+        if is_correct:
+            self.show_overlay("Correct!", timeout_ms=1500)
+        else:
+            self.show_overlay(f"Wrong — correct: {expected_display}", timeout_ms=1500)
 
     # ---------------- question building ----------------
     def NewDrillQuestion(self, type_hint, index, total_count):
@@ -662,54 +897,161 @@ class MainWindow(QMainWindow):
             if v is None:
                 return ""
             if isinstance(v, (list, tuple)):
-                return ", ".join(str(x) for x in v)
+                # for meanings we want readable comma-separated; for readings we won't use this formatter
+                return ", ".join(str(x) for x in v if x is not None)
             return str(v)
 
         drill_type = self.drillFilters["drill"]
         prompt_is_kanji = False
 
         if drill_type == "Meaning":
-            kanji_to_meaning = random.choice([True, False])
             meaning_field = "meanings" if is_jlpt else "wk_meanings"
+
+            # If Meaning mode is Writing: always show kanji prompt and require typed meaning.
+            if getattr(self, "meaning_mode", "multiple_choice") == "writing":
+                question_text = fmt_value(self.currentRow.get("kanji"))
+                prompt_is_kanji = True
+
+                meanings_list = self._normalize_meaning_list(self.currentRow.get(meaning_field))
+                correct_answer = ", ".join(meanings_list)  # display in feedback/results
+                self._current_meanings_list = meanings_list
+
+                # store canonical correct display string
+                self.current_question_prompt_is_kanji = prompt_is_kanji
+                self.correct_answer_text = correct_answer
+
+                container = QWidget()
+                vlayout = QVBoxLayout(container)
+                vlayout.setSpacing(8)
+
+                qlabel = QLabel(question_text)
+                qlabel.setAlignment(Qt.AlignmentFlag.AlignCenter)
+                qlabel.setWordWrap(True)
+                base_font = qlabel.font()
+                base_font.setPointSize(56)
+                qlabel.setFont(base_font)
+                vlayout.addWidget(qlabel)
+
+                # input row: textbox + Enter button (right)
+                input_row = QHBoxLayout()
+                self.meaning_input = QLineEdit()
+                self.meaning_input.setPlaceholderText("Type a meaning…")
+                self.meaning_input.setClearButtonEnabled(True)
+                self.meaning_input.setFocus()
+
+                self.meaning_enter_btn = QPushButton("Enter")
+                self.meaning_enter_btn.setFixedWidth(90)
+
+                input_row.addWidget(self.meaning_input)
+                input_row.addWidget(self.meaning_enter_btn)
+                vlayout.addLayout(input_row)
+
+                # submit via click or Enter key
+                self.meaning_enter_btn.clicked.connect(self.submit_meaning_written)
+                self.meaning_input.returnPressed.connect(self.submit_meaning_written)
+
+                display_index = index + 1
+                status_label = QLabel(f"{display_index}/{total_count}")
+                status_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+                self._drill_status_label = status_label
+                vlayout.addWidget(status_label)
+
+                return container
+
+            # Otherwise: Multiple choice behavior (your existing logic)
+            kanji_to_meaning = random.choice([True, False])
+
             if kanji_to_meaning:
                 question_text = fmt_value(self.currentRow["kanji"])
                 prompt_is_kanji = True
                 correct_answer = fmt_value(self.currentRow.get(meaning_field))
+
                 wrong_answers = [fmt_value(r.get(meaning_field)) for _, r in self.currentQuestionBatch.iterrows()]
+                wrong_answers = [w for w in wrong_answers if w and w != correct_answer]
                 all_answers = [correct_answer] + wrong_answers
+
+                all_answers = list(dict.fromkeys(all_answers))[:4]
+                while len(all_answers) < 4:
+                    all_answers.append("")
                 random.shuffle(all_answers)
                 button_texts = all_answers
             else:
                 question_text = fmt_value(self.currentRow.get(meaning_field))
                 prompt_is_kanji = False
                 correct_answer = fmt_value(self.currentRow.get("kanji"))
+
                 wrong_answers = [fmt_value(r.get("kanji")) for _, r in self.currentQuestionBatch.iterrows()]
+                wrong_answers = [w for w in wrong_answers if w and w != correct_answer]
                 all_answers = [correct_answer] + wrong_answers
+
+                all_answers = list(dict.fromkeys(all_answers))[:4]
+                while len(all_answers) < 4:
+                    all_answers.append("")
                 random.shuffle(all_answers)
                 button_texts = all_answers
 
         elif drill_type == "Reading":
-            on_field = "readings_on" if is_jlpt else "wk_readings_on"
-            kun_field = "readings_kun" if is_jlpt else "wk_readings_kun"
-            use_on = random.choice([True, False])
-            reading_field = on_field if use_on else kun_field
+            prefer = self.reading_type  # "kunyomi" or "onyomi"
+
+            # correct answer is the FULL LIST string (joined), not a single reading
+            correct_answer = self._pick_readings_text(self.currentRow, is_jlpt, prefer)
+            if not correct_answer:
+                fallback = "onyomi" if prefer == "kunyomi" else "kunyomi"
+                correct_answer = self._pick_readings_text(self.currentRow, is_jlpt, fallback)
+
+            if not correct_answer:
+                alt = self.currentRow.get("meanings") or self.currentRow.get("wk_meanings")
+                correct_answer = fmt_value(alt) or fmt_value(self.currentRow.get("kanji")) or ""
+
             question_text = fmt_value(self.currentRow.get("kanji"))
             prompt_is_kanji = True
-            correct_answer = fmt_value(self.currentRow.get(reading_field))
-            wrong_answers = [fmt_value(r.get(reading_field)) for _, r in self.currentQuestionBatch.iterrows()]
-            all_answers = [correct_answer] + wrong_answers
-            random.shuffle(all_answers)
-            button_texts = all_answers
+
+            distractors = self._collect_reading_distractors(
+                self.currentQuestionBatch, is_jlpt, prefer, needed=3, exclude={correct_answer}
+            )
+
+            if len(distractors) < 3 and hasattr(self, "currentSample") and self.currentSample is not None:
+                more = self._collect_reading_distractors(
+                    self.currentSample, is_jlpt, prefer, needed=10, exclude={correct_answer}
+                )
+                for m in more:
+                    if m not in distractors:
+                        distractors.append(m)
+                        if len(distractors) >= 3:
+                            break
+
+            while len(distractors) < 3:
+                distractors.append("")
+
+            all_answers = [correct_answer] + distractors[:3]
+
+            # dedupe, then ensure 4 buttons exist
+            ordered = list(dict.fromkeys(all_answers))
+            while len(ordered) < 4:
+                ordered.append("")
+            ordered = ordered[:4]
+
+            random.shuffle(ordered)
+            button_texts = ordered
+
         else:
+            # fallback: treat similar to Meaning prompt
             question_text = fmt_value(self.currentRow.get("kanji"))
             prompt_is_kanji = True
-            correct_answer = fmt_value(self.currentRow.get("meanings"))
-            wrong_answers = [fmt_value(r.get("meanings")) for _, r in self.currentQuestionBatch.iterrows()]
+            correct_answer = fmt_value(self.currentRow.get("meanings") or self.currentRow.get("wk_meanings"))
+            wrong_answers = [fmt_value(r.get("meanings") or r.get("wk_meanings")) for _, r in self.currentQuestionBatch.iterrows()]
+            wrong_answers = [w for w in wrong_answers if w and w != correct_answer]
             all_answers = [correct_answer] + wrong_answers
+            all_answers = list(dict.fromkeys(all_answers))[:4]
+            while len(all_answers) < 4:
+                all_answers.append("")
             random.shuffle(all_answers)
             button_texts = all_answers
 
+        # store canonical correct answer (string)
         self.current_question_prompt_is_kanji = prompt_is_kanji
+        self.correct_answer_text = correct_answer
+
         container = QWidget()
         vlayout = QVBoxLayout(container)
         vlayout.setSpacing(8)
@@ -730,22 +1072,23 @@ class MainWindow(QMainWindow):
         answer_grid.setSpacing(6)
 
         self.answer_buttons = []
-        self.correct_answer_text = correct_answer
+        # correct_answer_text already set above
 
-        btn_font = QFont()
-        btn_font.setPointSize(14)
 
+
+        # When comparing, we compare button.text() == self.correct_answer_text (exact string)
         for i, text in enumerate(button_texts[:4]):
             btn = WrapButton(text)
-            btn.setFont(btn_font)
-            btn.setMinimumHeight(80)
-            is_correct = (text == correct_answer)
+            btn.setFont(self._answer_button_font_for_text(text))
+            is_correct = (text == self.correct_answer_text)
+            # use a default argument to capture is_correct and btn for the lambda
             btn.clicked.connect(lambda checked=False, b=btn, correct=is_correct: self.checkAnswer(correct, b))
             r = i // 2
             c = i % 2
             answer_grid.addWidget(btn, r, c)
             self.answer_buttons.append(btn)
 
+        # placeholders if fewer than 4
         for i in range(len(button_texts), 4):
             placeholder = WrapButton("")
             placeholder.setEnabled(False)
@@ -924,8 +1267,12 @@ class MainWindow(QMainWindow):
 
     # ---------------- answer checking ----------------
     def checkAnswer(self, is_correct, clicked_button):
+        # disable buttons immediately
         for b in getattr(self, "answer_buttons", []):
-            b.setEnabled(False)
+            try:
+                b.setEnabled(False)
+            except Exception:
+                pass
 
         try:
             kanji_key = str(self.currentRow.get("kanji"))
@@ -935,26 +1282,37 @@ class MainWindow(QMainWindow):
         given_text = clicked_button.text() if clicked_button is not None else ""
         expected_text = getattr(self, "correct_answer_text", "")
 
+        # append session result
         self.session_results.append({"kanji": kanji_key, "given": given_text, "expected": expected_text, "correct": bool(is_correct)})
 
+        # update stats/profile
         self.update_stats_and_profile(kanji_key, bool(is_correct))
 
+        # visual feedback
         if is_correct:
             if clicked_button is not None:
-                clicked_button.setStyleSheet("background-color: lightgreen;")
+                try:
+                    clicked_button.setStyleSheet("background-color: lightgreen;")
+                except Exception:
+                    pass
             self.show_overlay("Correct!", timeout_ms=1500)
         else:
+            # highlight the correct one
             for b in getattr(self, "answer_buttons", []):
                 try:
-                    if b.text() == self.correct_answer_text:
+                    if b.text() == expected_text:
                         b.setStyleSheet("background-color: lightgreen;")
                     else:
+                        # reset others
                         b.setStyleSheet("")
                 except Exception:
                     pass
             if clicked_button is not None:
-                clicked_button.setStyleSheet("background-color: lightcoral;")
-            self.show_overlay(f"Wrong — correct: {self.correct_answer_text}", timeout_ms=1500)
+                try:
+                    clicked_button.setStyleSheet("background-color: lightcoral;")
+                except Exception:
+                    pass
+            self.show_overlay(f"Wrong — correct: {expected_text}", timeout_ms=1500)
 
     def _advance_after_popup(self):
         self.currentQuestionIndex += 1
@@ -1222,6 +1580,11 @@ class MainWindow(QMainWindow):
 
 def basicLoop():
     app = QApplication(sys.argv)
+
+    icon_path = resource_path("app.ico")
+    if os.path.exists(icon_path):
+        app.setWindowIcon(QIcon(icon_path))
+
     window = MainWindow()
     window.show()
     app.exec()
