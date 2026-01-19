@@ -1,0 +1,14 @@
+{
+  "username": "User",
+  "pfp_path": "pfp.png",
+  "xp": {
+    "JLPT": {
+      "Meaning": 0,
+      "Reading": 0
+    },
+    "WaniKani": {
+      "Meaning": 0,
+      "Reading": 0
+    }
+  }
+}
