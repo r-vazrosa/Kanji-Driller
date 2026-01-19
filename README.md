@@ -10,9 +10,15 @@ KanjiDriller is a desktop application designed to help learners practice **kanji
 - Session-based tracking of incorrect answers
 - Customizable user profile (username and profile image)
 
+## Status
+This project is in its **initial release** and under active development.
+
 ## Data Source
 Kanji data is provided by the excellent dataset maintained by  
 [davidluzgouveia](https://github.com/davidluzgouveia/kanji-data).
 
-## Status
-This project is in its **initial release** and under active development.
+## Third-Party Licenses
+See THIRD_PARTY_LICENSES.md for licensing information for bundled datasets.
+
+
+
