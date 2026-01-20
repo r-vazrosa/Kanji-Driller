@@ -124,12 +124,14 @@ class MainWindow(QMainWindow):
             "jlpt_levels": [5],
             "wanikani_levels": [],
             "count": 4,
-            "max_count": 79
+            "max_count": 79,
+            "prioritize_weakness": True
         }
 
 
         self.reading_type = "kunyomi"
         self.meaning_mode = "multiple_choice"
+        
 
         # load/create persistence first so profile_data exists
         self.kanji_stats = {}
@@ -341,6 +343,11 @@ class MainWindow(QMainWindow):
         DrillMenuCountLayout.addWidget(self.DrillMenuCountSpin)
         DrillMenuLayout.addLayout(DrillMenuCountLayout)
 
+        self.DrillMenuPrioritizeWeaknessCB = QCheckBox("Prioritize weakness")
+        self.DrillMenuPrioritizeWeaknessCB.setChecked(bool(self.drillFilters.get("prioritize_weakness", True)))
+        self.DrillMenuPrioritizeWeaknessCB.stateChanged.connect(self.prioritizeweakness_changed)
+        DrillMenuLayout.addWidget(self.DrillMenuPrioritizeWeaknessCB)
+
         # JLPT levels row
         self.DrillMenuJLPTSection = QWidget()
         DrillMenuJLPTLayout = QHBoxLayout(self.DrillMenuJLPTSection)
@@ -440,6 +447,14 @@ class MainWindow(QMainWindow):
             self.kanji_stats = {}
             self.save_stats()
 
+        # normalize schema (adds pw_* keys to old stats files)
+        try:
+            for k in list(self.kanji_stats.keys()):
+                self.ensure_kanji_entry(k)
+            self.save_stats()
+        except Exception:
+            pass
+
     def save_stats(self):
         try:
             with open(self.stats_path, "w", encoding="utf-8") as f:
@@ -522,6 +537,8 @@ class MainWindow(QMainWindow):
             for dr in ("Meaning", "Reading"):
                 self.profile_data["xp"][sysn].setdefault(dr, 0)
         # finally save normalized profile (may rewrite paths to absolute appdata)
+        self.profile_data.setdefault("pw_question_counter", 0)
+        self.profile_data.setdefault("pw_session_counter", 0)
         self.save_profile()
 
     def save_profile(self):
@@ -646,6 +663,9 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
         self.update_count_label()
+
+    def prioritizeweakness_changed(self, state):
+        self.drillFilters["prioritize_weakness"] = bool(state == Qt.CheckState.Checked)
 
     def readingtype_changed(self, text):
         # map UI choice to internal value
@@ -1139,10 +1159,39 @@ class MainWindow(QMainWindow):
         if final_count < 4:
             QMessageBox.critical(self, "Error", "Require at least 4 cards to start a drill. Pick more cards/levels.")
             return
+        
+        # ---- PW session-based cooldown setup ----
+        coverage = (final_count / max_available) if max_available > 0 else 1.0
+
+        # cooldown in *sessions* (adaptive):
+        # higher coverage => allow reappearance sooner
+        if coverage >= 0.40:
+            self._pw_cooldown_sessions = 0
+        elif coverage >= 0.25:
+            self._pw_cooldown_sessions = 1
+        elif coverage >= 0.12:
+            self._pw_cooldown_sessions = 2
+        else:
+            self._pw_cooldown_sessions = 3
+
+        # If PW mode ON, increment session counter once per drill
+        if bool(self.drillFilters.get("prioritize_weakness", True)):
+            try:
+                self.profile_data["pw_session_counter"] = int(self.profile_data.get("pw_session_counter", 0)) + 1
+            except Exception:
+                self.profile_data["pw_session_counter"] = 1
+            self._pw_current_session_id = int(self.profile_data.get("pw_session_counter", 0))
+            # persist this immediately so session counter survives crashes mid-drill
+            self.save_profile()
+        else:
+            self._pw_current_session_id = 0
 
         self.drillFilters["count"] = final_count
         self.totalQuestions = int(self.drillFilters["count"])
-        self.currentSample = getRandomSample(self.df_f, final_count)
+        if bool(self.drillFilters.get("prioritize_weakness", True)):
+            self.currentSample = self.get_pw_weighted_sample(self.df_f, final_count)
+        else:
+            self.currentSample = getRandomSample(self.df_f, final_count)
 
         # safety check
         if hasattr(self.currentSample, "shape") and int(self.currentSample.shape[0]) < 4:
@@ -1166,6 +1215,123 @@ class MainWindow(QMainWindow):
             QApplication.processEvents()
 
         self.stack.slide_to(2, "left")
+
+    def _pw_weight_for_row(self, row):
+        """
+        Weight based on:
+        - Laplace-smoothed wrong rate using pw stats: (w+1)/(r+w+2)
+        - staleness multiplier based on pw_last_seen and global pw_question_counter
+        - small floor so nothing is impossible
+        """
+        try:
+            kanji_key = str(row.get("kanji"))
+        except Exception:
+            kanji_key = ""
+
+        # Ensure entry exists so we can read defaults
+        if kanji_key:
+            self.ensure_kanji_entry(kanji_key)
+
+        system_name = self.drillFilters["system"]
+        drill_name = self.drillFilters["drill"]
+
+        bucket = None
+        try:
+            bucket = self.kanji_stats.get(kanji_key, {}).get(system_name, {}).get(drill_name, {})
+        except Exception:
+            bucket = {}
+
+        r = int(bucket.get("pw_right", 0) or 0)
+        w = int(bucket.get("pw_wrong", 0) or 0)
+        last = int(bucket.get("pw_last_seen", 0) or 0)
+
+        last_sess = int(bucket.get("pw_last_seen_session", 0) or 0)
+        now_sess = int(self.profile_data.get("pw_session_counter", 0) or 0)
+        sess_age = max(0, now_sess - last_sess)
+
+        # Laplace smoothing
+        wrong_rate = (w + 1.0) / (r + w + 2.0)  # 0..1
+
+        # staleness
+        now = int(self.profile_data.get("pw_question_counter", 0) or 0)
+        age = max(0, now - last)
+
+        # cap controls how quickly staleness ramps (tweak later)
+        cap = 200.0
+        stale_mult = 1.0 + min(age, cap) / cap  # 1.0..2.0
+
+        # Session cooldown penalty (soft): recently-seen-in-session => lower weight
+        cool_sess = int(getattr(self, "_pw_cooldown_sessions", 0) or 0)
+        if cool_sess > 0 and sess_age <= cool_sess:
+            # sess_age=0 (same session) shouldn't occur with no-replacement sampling,
+            # but keep safe. This ramps up toward 1.0 as it ages out of cooldown.
+            session_cooldown_factor = 0.20 + 0.80 * (sess_age / float(cool_sess))
+        else:
+            session_cooldown_factor = 1.0
+
+        floor = 0.08  # tweak later
+        weight = (floor + (wrong_rate * stale_mult)) * session_cooldown_factor
+        return max(0.0001, float(weight))
+
+
+    def _weighted_choice_index(self, indices, weights):
+        """
+        Pick one index from indices using weights (same length), returns chosen index position.
+        """
+        total = 0.0
+        for w in weights:
+            total += float(w)
+
+        if total <= 0.0:
+            return random.randrange(len(indices))
+
+        r = random.random() * total
+        acc = 0.0
+        for i, w in enumerate(weights):
+            acc += float(w)
+            if acc >= r:
+                return i
+        return len(indices) - 1
+
+
+    def get_pw_weighted_sample(self, df, n):
+        """
+        Returns a DataFrame sample of size n without replacement using pw weights.
+        Falls back to uniform random if anything goes wrong.
+        """
+        try:
+            # pandas dataframe assumed
+            if df is None or len(df) == 0:
+                return df
+
+            n = int(n)
+            n = max(1, min(n, len(df)))
+
+            # Build lists so we can remove chosen rows (without replacement)
+            rows = []
+            weights = []
+            for idx, row in df.iterrows():
+                rows.append((idx, row))
+                weights.append(self._pw_weight_for_row(row))
+
+            chosen_indices = []
+            # sample without replacement
+            for _ in range(n):
+                pick_pos = self._weighted_choice_index(rows, weights)
+                idx, _row = rows.pop(pick_pos)
+                weights.pop(pick_pos)
+                chosen_indices.append(idx)
+
+            sampled = df.loc[chosen_indices]
+            sampled = sampled.reindex(chosen_indices)
+            return sampled
+
+        except Exception:
+            # hard fallback
+            try:
+                return getRandomSample(df, n)
+            except Exception:
+                return df
 
     def showQuestion(self):
         if self.currentQuestionIndex >= self.totalQuestions:
@@ -1237,20 +1403,58 @@ class MainWindow(QMainWindow):
 
     # ---------------- stats/profile updates ----------------
     def ensure_kanji_entry(self, kanji_key):
+        def bucket_defaults():
+            return {
+                "right": 0,
+                "wrong": 0,
+                "streak": 0,
+                "pw_right": 0,
+                "pw_wrong": 0,
+                "pw_streak": 0,
+                "pw_last_seen": 0,
+                "pw_last_seen_session": 0
+            }
+
         if kanji_key not in self.kanji_stats:
             self.kanji_stats[kanji_key] = {
                 "total_encounters": 0,
-                "JLPT": {"Meaning": {"right": 0, "wrong": 0, "streak": 0}, "Reading": {"right": 0, "wrong": 0, "streak": 0}},
-                "WaniKani": {"Meaning": {"right": 0, "wrong": 0, "streak": 0}, "Reading": {"right": 0, "wrong": 0, "streak": 0}}
+                "JLPT": {"Meaning": bucket_defaults(), "Reading": bucket_defaults()},
+                "WaniKani": {"Meaning": bucket_defaults(), "Reading": bucket_defaults()}
             }
+        else:
+            # normalize existing entry too
+            entry = self.kanji_stats[kanji_key]
+            entry.setdefault("total_encounters", 0)
+            entry.setdefault("JLPT", {})
+            entry.setdefault("WaniKani", {})
+            for sysn in ("JLPT", "WaniKani"):
+                entry.setdefault(sysn, {})
+                for dr in ("Meaning", "Reading"):
+                    entry[sysn].setdefault(dr, {})
+                    b = entry[sysn][dr]
+                    # base fields
+                    b.setdefault("right", 0)
+                    b.setdefault("wrong", 0)
+                    b.setdefault("streak", 0)
+                    # pw fields
+                    b.setdefault("pw_right", 0)
+                    b.setdefault("pw_wrong", 0)
+                    b.setdefault("pw_streak", 0)
+                    b.setdefault("pw_last_seen", 0)
+                    b.setdefault("pw_last_seen_session", 0)
+
 
     def update_stats_and_profile(self, kanji_key, is_correct):
         system_name = self.drillFilters["system"]
         drill_name = self.drillFilters["drill"]
+
         self.ensure_kanji_entry(kanji_key)
         entry = self.kanji_stats[kanji_key]
         entry["total_encounters"] = int(entry.get("total_encounters", 0)) + 1
+
         bucket = entry[system_name][drill_name]
+
+        # ---- always update BASE stats (normal mode tracking) ----
         if is_correct:
             bucket["right"] = int(bucket.get("right", 0)) + 1
             bucket["streak"] = int(bucket.get("streak", 0)) + 1
@@ -1258,6 +1462,29 @@ class MainWindow(QMainWindow):
             bucket["wrong"] = int(bucket.get("wrong", 0)) + 1
             bucket["streak"] = 0
 
+        # ---- if PW mode enabled, also update PW stats ----
+        if bool(self.drillFilters.get("prioritize_weakness", True)):
+            # increment global PW counter
+            try:
+                self.profile_data["pw_question_counter"] = int(self.profile_data.get("pw_question_counter", 0)) + 1
+            except Exception:
+                self.profile_data["pw_question_counter"] = 1
+
+            now = int(self.profile_data.get("pw_question_counter", 0))
+            bucket["pw_last_seen"] = now
+            try:
+                bucket["pw_last_seen_session"] = int(getattr(self, "_pw_current_session_id", 0) or 0)
+            except Exception:
+                bucket["pw_last_seen_session"] = 0
+
+            if is_correct:
+                bucket["pw_right"] = int(bucket.get("pw_right", 0)) + 1
+                bucket["pw_streak"] = int(bucket.get("pw_streak", 0)) + 1
+            else:
+                bucket["pw_wrong"] = int(bucket.get("pw_wrong", 0)) + 1
+                bucket["pw_streak"] = 0
+
+        # XP stays the same
         gained = self.xp_for_answer(system_name, drill_name, is_correct)
         self.profile_data["xp"][system_name][drill_name] = int(self.profile_data["xp"][system_name][drill_name]) + int(gained)
         self.session_xp[system_name][drill_name] = int(self.session_xp[system_name][drill_name]) + int(gained)
