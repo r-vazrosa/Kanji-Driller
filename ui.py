@@ -352,11 +352,6 @@ class MainWindow(QMainWindow):
         DrillMenuCountLayout.addWidget(self.DrillMenuCountSpin)
         DrillMenuLayout.addLayout(DrillMenuCountLayout)
 
-        self.DrillMenuPrioritizeWeaknessCB = QCheckBox("Prioritize weakness")
-        self.DrillMenuPrioritizeWeaknessCB.setChecked(bool(self.drillFilters.get("prioritize_weakness", True)))
-        self.DrillMenuPrioritizeWeaknessCB.stateChanged.connect(self.prioritizeweakness_changed)
-        DrillMenuLayout.addWidget(self.DrillMenuPrioritizeWeaknessCB)
-
         popup_row = QHBoxLayout()
         popup_row.setContentsMargins(0, 0, 0, 0)
         popup_row.setSpacing(6)
@@ -369,14 +364,18 @@ class MainWindow(QMainWindow):
         popup_spin.setValue(float(self.popup_seconds))
         popup_spin.setToolTip("Set how long the answer popup shows (0 = no popup).")
 
-        # store widget ref
         self.DrillMenuPopupSpin = popup_spin
         popup_spin.valueChanged.connect(lambda v: setattr(self, "popup_seconds", float(v)))
 
         popup_row.addWidget(popup_label)
         popup_row.addWidget(popup_spin)
-        # place it under the checkbox visually (or next to it if you prefer)
         DrillMenuLayout.addLayout(popup_row)
+
+        self.DrillMenuPrioritizeWeaknessCB = QCheckBox("Prioritize weakness")
+        self.DrillMenuPrioritizeWeaknessCB.setChecked(bool(self.drillFilters.get("prioritize_weakness", True)))
+        self.DrillMenuPrioritizeWeaknessCB.stateChanged.connect(self.prioritizeweakness_changed)
+        DrillMenuLayout.addWidget(self.DrillMenuPrioritizeWeaknessCB)
+
 
         # JLPT levels row
         self.DrillMenuJLPTSection = QWidget()
