@@ -10,7 +10,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout, QLabel, QScrollArea, QFrame, QProgressBar, QFileDialog, QLineEdit,
     QDoubleSpinBox
 )
-from PySide6.QtGui import QFont, QPixmap, QPainter, QTextOption, QIcon
+from PySide6.QtGui import QFont, QColor, QPixmap, QPainter, QTextOption, QIcon
 from PySide6.QtCore import Qt, QTimer, QPropertyAnimation, QParallelAnimationGroup, QPoint, QEasingCurve, QRect
 
 import time
@@ -69,15 +69,12 @@ class WrapButton(QPushButton):
         super().setText(self._wrap_text)
 
     def paintEvent(self, event):
-        opt = QTextOption()
-        opt.setWrapMode(QTextOption.WrapAtWordBoundaryOrAnywhere)
-        opt.setAlignment(Qt.AlignCenter)
-
+        # Use normal QPainter drawing with flags rather than QTextOption (more portable)
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing, True)
 
         r = self.rect()
-        # draw background
+        # draw background using the button palette
         painter.fillRect(r, self.palette().button())
 
         painter.setPen(self.palette().buttonText().color())
@@ -86,7 +83,9 @@ class WrapButton(QPushButton):
         pad = 8
         text_rect = QRect(r.left() + pad, r.top() + pad, r.width() - pad * 2, r.height() - pad * 2)
 
-        painter.drawText(text_rect, self._wrap_text, opt)
+        # Use flags that combine word-wrap and centered text
+        flags = Qt.TextWordWrap | Qt.AlignCenter
+        painter.drawText(text_rect, int(flags), self._wrap_text)
 
         if self.underMouse():
             painter.setPen(self.palette().mid().color())
@@ -109,6 +108,292 @@ class ClickableLabel(QLabel):
             self._on_click()
         super().mousePressEvent(event)
 
+class HeatmapDialog(QWidget):
+    """
+    Simple calendar-style heatmap view.
+    Expects activity dict in the form:
+    { "YYYY-MM-DD": {"questions": int, "seconds": int}, ... }
+    """
+    def __init__(self, parent=None, activity=None):
+        super().__init__(parent, Qt.Window)
+        self.setWindowTitle("Activity Heatmap")
+        self.activity = activity or {}
+        self.setMinimumSize(720, 420)
+
+        layout = QVBoxLayout(self)
+        controls = QHBoxLayout()
+
+        self.year_combo = QComboBox()
+        self.month_combo = QComboBox()
+
+        years = self._available_years()
+        if not years:
+            years = [int(time.strftime("%Y"))]
+        for y in sorted(years, reverse=True):
+            self.year_combo.addItem(str(y))
+
+        # months 1..12 (0 is "All")
+        import calendar as _calendar
+        months = [("All", 0)] + [( _calendar.month_name[m], m) for m in range(1, 13)]
+        self.months = months
+        for name, m in self.months:
+            self.month_combo.addItem(name, m)
+
+        controls.addWidget(QLabel("Year:"))
+        controls.addWidget(self.year_combo)
+        controls.addWidget(QLabel("Month:"))
+        controls.addWidget(self.month_combo)
+        controls.addStretch()
+
+        self.legend_label = QLabel("")
+        controls.addWidget(self.legend_label)
+
+        layout.addLayout(controls)
+
+        # Canvas: subclassed widget so we can rely on paintEvent/mouse events
+        class Canvas(QWidget):
+            def __init__(self, owner):
+                super().__init__(owner)
+                self.owner = owner
+                self.setMouseTracking(True)
+
+            def paintEvent(self, ev):
+                painter = QPainter(self)
+                try:
+                    self.owner._draw_heatmap(self, painter)
+                finally:
+                    painter.end()
+
+            def mouseMoveEvent(self, ev):
+                self.owner._handle_mouse_move(self, ev.pos())
+
+            def leaveEvent(self, ev):
+                self.owner._hide_hover()
+
+        self.canvas = Canvas(self)
+        self.canvas.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        layout.addWidget(self.canvas)
+
+        # tooltip label used on hover (parented to canvas)
+        self._hover_label = QLabel("", self.canvas)
+        self._hover_label.setStyleSheet("background: rgba(0,0,0,0.75); color: white; padding:4px; border-radius:4px;")
+        self._hover_label.hide()
+
+        # redraw controls
+        self.year_combo.currentIndexChanged.connect(lambda _: self.canvas.update())
+        self.month_combo.currentIndexChanged.connect(lambda _: self.canvas.update())
+
+    def _available_years(self):
+        years = set()
+        for k in (self.activity or {}).keys():
+            try:
+                years.add(int(k[:4]))
+            except Exception:
+                pass
+        return sorted(years)
+
+    def _gather_month_map(self, year, month):
+        data = {}
+        if month == 0:
+            # aggregate per month
+            for daykey, v in (self.activity or {}).items():
+                try:
+                    y, m, d = daykey.split("-")
+                    y_i = int(y); m_i = int(m)
+                except Exception:
+                    continue
+                if y_i != year:
+                    continue
+                rec = data.setdefault(m_i, {"questions": 0, "seconds": 0})
+                rec["questions"] += int((v or {}).get("questions", 0) or 0)
+                rec["seconds"] += int((v or {}).get("seconds", 0) or 0)
+        else:
+            import calendar
+            _, ndays = calendar.monthrange(year, month)
+            for day in range(1, ndays + 1):
+                key = f"{year:04d}-{month:02d}-{day:02d}"
+                rec = self.activity.get(key) or {}
+                data[day] = {"questions": int(rec.get("questions", 0) or 0), "seconds": int(rec.get("seconds", 0) or 0)}
+        return data
+
+    def _max_value_in_map(self, m):
+        if not m:
+            return 0
+        return max((v.get("questions", 0) for v in m.values()), default=0)
+
+    def _mix_gray_to_green(self, t):
+        from PySide6.QtGui import QColor
+        t = max(0.0, min(1.0, float(t)))
+        g_r = int(200 + (0 - 200) * t)
+        g_g = int(200 + (180 - 200) * t)
+        g_b = int(200 + (0 - 200) * t)
+        return QColor(g_r, g_g, g_b)
+
+    def _draw_heatmap(self, canvas_widget, painter):
+        # painter is a QPainter already constructed by the Canvas.paintEvent
+        w = canvas_widget.width()
+        h = canvas_widget.height()
+        painter.fillRect(0, 0, w, h, canvas_widget.palette().window())
+
+        # read controls
+        year_text = self.year_combo.currentText()
+        try:
+            year = int(year_text)
+        except Exception:
+            year = int(time.strftime("%Y"))
+        month = int(self.month_combo.currentData() or 0)
+
+        data_map = self._gather_month_map(year, month)
+        maxv = max(1, self._max_value_in_map(data_map))
+
+        painter.setPen(Qt.black)
+
+        if month == 0:
+            cols = 4
+            rows = 3
+            pad = 12
+            box_w = max(24, (w - pad * 2) // cols - 8)
+            box_h = max(24, (h - 60 - pad * 2) // rows - 8)
+            for i in range(12):
+                mnum = i + 1
+                r = i // cols
+                c = i % cols
+                x = pad + c * (box_w + 8)
+                y = pad + r * (box_h + 8) + 30
+                rec = data_map.get(mnum, {"questions": 0, "seconds": 0})
+                val = int(rec.get("questions", 0) or 0)
+                t = val / float(maxv)
+                color = self._mix_gray_to_green(t)
+                painter.fillRect(x, y, box_w, box_h, color)
+                painter.drawRect(x, y, box_w, box_h)
+                painter.drawText(x + 6, y + 18, time.strftime("%b", time.strptime(f"{mnum}", "%m")))
+                setattr(self, f"_cell_{i}", QRect(x, y, box_w, box_h))
+                setattr(self, f"_cell_val_{i}", (mnum, rec))
+        else:
+            import calendar
+            cal = calendar.Calendar(firstweekday=0)
+            days = list(cal.itermonthdates(year, month))
+            month_days = [d for d in days if d.month == month]
+            cols = 7
+            first_weekday = month_days[0].weekday()  # Monday=0
+            rows = ((len(month_days) + first_weekday) + (cols - 1)) // cols
+            pad = 10
+            top = 30
+            box_w = max(18, (w - pad * 2) // cols - 6)
+            box_h = max(18, (h - top - pad * 2) // rows - 6)
+            # weekday headers
+            import datetime
+
+            today = datetime.date.today()
+            is_current_month = (today.year == year and today.month == month)
+
+            # header geometry
+            header_h = 22
+            header_y = top - header_h - 6
+
+            # theme-aware greys (use palette so dark/light modes behave sensibly)
+            base_bg = canvas_widget.palette().window().color()
+            header_grey = canvas_widget.palette().mid().color()      # use palette mid color for header grey
+            header_grey_brush = header_grey
+
+            # a soft highlight color for today (feel free to adjust)
+            today_highlight = QColor(180, 210, 255)
+
+            border_color = canvas_widget.palette().shadow().color()
+            painter.setPen(border_color)
+
+            weekday_names = ["Mon","Tue","Wed","Thu","Fri","Sat","Sun"]
+            for c in range(7):
+                txt = weekday_names[c]
+                hx = pad + c * (box_w + 6)
+                header_rect = QRect(hx, header_y, box_w, header_h)
+
+                # choose background: today's column gets the highlight; others grey
+                if is_current_month and c == today.weekday():
+                    painter.fillRect(header_rect, today_highlight)
+                else:
+                    painter.fillRect(header_rect, header_grey_brush)
+
+                # border and centered text
+                painter.drawRect(header_rect)
+                painter.setPen(Qt.black)  # headers should use black text on light gray
+                painter.drawText(header_rect, Qt.AlignCenter, txt)
+            for idx, d in enumerate(month_days):
+                pos = idx + first_weekday
+                r = pos // cols
+                c = pos % cols
+                x = pad + c * (box_w + 6)
+                y = top + r * (box_h + 6)
+                rec = data_map.get(d.day, {"questions": 0, "seconds": 0})
+                val = int(rec.get("questions", 0) or 0)
+                t = val / float(maxv)
+                color = self._mix_gray_to_green(t)
+                cell_rect = QRect(x, y, box_w, box_h)
+                painter.fillRect(cell_rect, color)
+                painter.drawRect(cell_rect)
+
+                # center the day number inside the same rect so headers and day columns align
+                painter.setPen(Qt.black)
+                painter.drawText(cell_rect, Qt.AlignCenter, str(d.day))
+                setattr(self, f"_cell_{idx}", QRect(x, y, box_w, box_h))
+                setattr(self, f"_cell_val_{idx}", (d, rec))
+
+        # update legend
+        self.legend_label.setText(f"Max: {maxv} questions — gray→green scale")
+
+    def _handle_mouse_move(self, canvas_widget, pos):
+        # use same formatting as before
+        def fmt_time(seconds):
+            try:
+                s = int(seconds or 0)
+                h = s // 3600
+                m = (s % 3600) // 60
+                if h > 0:
+                    return f"{h}h {m}m"
+                return f"{m}m"
+            except Exception:
+                return "0m"
+
+        for attr in dir(self):
+            if not attr.startswith("_cell_") or attr.startswith("_cell_val_"):
+                continue
+            rect = getattr(self, attr)
+            if isinstance(rect, QRect) and rect.contains(pos):
+                idx = attr.split("_")[-1]
+                valattr = f"_cell_val_{idx}"
+                if hasattr(self, valattr):
+                    v = getattr(self, valattr)
+                    if isinstance(v, tuple):
+                        key, rec = v
+                        rec = rec or {}
+                        q = int(rec.get("questions", 0) or 0)
+                        secs = int(rec.get("seconds", 0) or 0)
+                        timestr = fmt_time(secs)
+                        if isinstance(key, int):
+                            try:
+                                month_name = time.strftime('%B', time.strptime(str(key), '%m'))
+                            except Exception:
+                                month_name = str(key)
+                            text = f"{month_name} {self.year_combo.currentText()}: {q} questions — {timestr}"
+                        else:
+                            text = f"{key.isoformat()}: {q} questions — {timestr}"
+                        self._hover_label.setText(text)
+                        self._hover_label.adjustSize()
+                        x = pos.x() + 12
+                        y = pos.y() + 12
+                        max_x = canvas_widget.width() - self._hover_label.width() - 6
+                        max_y = canvas_widget.height() - self._hover_label.height() - 6
+                        x = min(max(6, x), max_x)
+                        y = min(max(6, y), max_y)
+                        self._hover_label.move(x, y)
+                        self._hover_label.show()
+                        return
+        self._hover_label.hide()
+
+    def _hide_hover(self):
+        if hasattr(self, "_hover_label"):
+            self._hover_label.hide()
+    
 
 class MainWindow(QMainWindow):
     def __init__(self):
@@ -131,18 +416,18 @@ class MainWindow(QMainWindow):
             "prioritize_weakness": True
         }
 
-
-        self.reading_type = "kunyomi"
-        self.meaning_mode = "multiple_choice"
-        
-
-        # load/create persistence first so profile_data exists
         self.kanji_stats = {}
         self.profile_data = {}
         self._results_page = None
         self._profile_page = None
+
+        # load/create persistence so profile_data and kanji_stats exist
         self.load_or_create_stats()
         self.load_or_create_profile()
+
+        # ensure activity is present and persist (creates activity key if missing)
+        self.profile_data.setdefault("activity", {})
+        self.save_profile()
 
         # initial dataframe sample
         self.df_f = filterDataFrame(self.drillFilters["system"], self.drillFilters["jlpt_levels"], self.drillFilters["drill"])
@@ -502,6 +787,8 @@ class MainWindow(QMainWindow):
             "xp": {"JLPT": {"Meaning": 0, "Reading": 0}, "WaniKani": {"Meaning": 0, "Reading": 0}}
         }
 
+        self.profile_data.setdefault("activity", {})
+
         # If profile file exists in user data dir, load it
         if os.path.exists(self.profile_path):
             try:
@@ -752,6 +1039,49 @@ class MainWindow(QMainWindow):
                     lst.remove(val)
             self.df_f = filterDataFrame(self.drillFilters["system"], self.drillFilters["wanikani_levels"], self.drillFilters["drill"])
         self.update_count_label()
+
+    def _start_session_timer(self):
+        """Call when drill starts."""
+        try:
+            self._session_timer_start = time.time()
+            self._session_accum_seconds = 0.0
+        except Exception:
+            self._session_timer_start = None
+            self._session_accum_seconds = 0.0
+
+    def _stop_session_timer_and_record(self):
+        """Call when drill ends to store seconds to profile_data for today's date."""
+        try:
+            if self._session_timer_start is None:
+                return
+            elapsed = time.time() - float(self._session_timer_start)
+            self._session_accum_seconds += max(0.0, float(elapsed))
+            self._session_timer_start = None
+        except Exception:
+            elapsed = 0.0
+
+        # persist accumulated seconds for today
+        today = time.strftime("%Y-%m-%d")
+        act = self.profile_data.setdefault("activity", {})
+        entry = act.setdefault(today, {"questions": 0, "seconds": 0})
+        try:
+            entry["seconds"] = int(entry.get("seconds", 0)) + int(round(self._session_accum_seconds))
+        except Exception:
+            entry["seconds"] = int(round(self._session_accum_seconds))
+        self.save_profile()
+        # reset
+        self._session_accum_seconds = 0.0
+
+    def _record_one_question_now(self):
+        """Increment today's question count by one and persist."""
+        today = time.strftime("%Y-%m-%d")
+        act = self.profile_data.setdefault("activity", {})
+        entry = act.setdefault(today, {"questions": 0, "seconds": 0})
+        try:
+            entry["questions"] = int(entry.get("questions", 0)) + 1
+        except Exception:
+            entry["questions"] = 1
+        self.save_profile()
 
     # ---------------- layout helpers ----------------
     def clear_layout(self, widget_or_layout):
@@ -1278,6 +1608,11 @@ class MainWindow(QMainWindow):
             self.TrainMainWidget.show()
             QApplication.processEvents()
 
+        try:
+            self._start_session_timer()
+        except Exception:
+            pass
+
         self.stack.slide_to(2, "left")
 
     def _pw_weight_for_row(self, row):
@@ -1575,6 +1910,11 @@ class MainWindow(QMainWindow):
         entry = self.kanji_stats[kanji_key]
         entry["total_encounters"] = int(entry.get("total_encounters", 0)) + 1
 
+        try:
+            self._record_one_question_now()
+        except Exception:
+            pass
+
         mode_key = self._current_mode_key()  # e.g., "Meaning:writing" or "Reading:kunyomi"
         bucket = entry[system_name].setdefault(mode_key, {})
         # ensure defaults exist (call ensure_kanji_entry already does, but be defensive)
@@ -1744,6 +2084,10 @@ class MainWindow(QMainWindow):
             return f"Reading:{rt}"
 
     def finishTraining(self):
+        try:
+            self._stop_session_timer_and_record()
+        except Exception:
+            pass
         self.build_results_page()
         idx = self.results_index()
         if idx is None:
@@ -1928,6 +2272,19 @@ class MainWindow(QMainWindow):
             self.profileTotalQuestions.setAlignment(Qt.AlignmentFlag.AlignHCenter)
             layout.addWidget(self.profileTotalQuestions)
 
+            today_col = QVBoxLayout()
+            self.profileTodaySummary = QLabel("")  # "Today: X q — hh:mm"
+            self.profileTodaySummary.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            self.profileTodaySummary.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
+            today_col.addWidget(self.profileTodaySummary, alignment=Qt.AlignmentFlag.AlignHCenter)
+
+            heatmap_btn = QPushButton("Open Heatmap")
+            heatmap_btn.setFixedSize(120, 28)
+            heatmap_btn.clicked.connect(self.open_heatmap)
+            today_col.addWidget(heatmap_btn, alignment=Qt.AlignmentFlag.AlignHCenter)
+
+            layout.addLayout(today_col)
+
             grid = QGridLayout()
             grid.setSpacing(8)
             self.profileBuckets = {}
@@ -1996,6 +2353,11 @@ class MainWindow(QMainWindow):
                 self.update_count_label()
             except Exception:
                 pass
+            
+    def open_heatmap(self):
+        dlg = HeatmapDialog(parent=self, activity=self.profile_data.get("activity", {}))
+        dlg.show()
+        dlg.raise_()
 
     def refresh_profile_page(self):
         if getattr(self, "_profile_page", None) is None:
@@ -2007,6 +2369,23 @@ class MainWindow(QMainWindow):
             pass
         # total questions
         self.profileTotalQuestions.setText(f"Total Questions Answered: {self.total_questions_answered_overall()}")
+        try:
+            today = time.strftime("%Y-%m-%d")
+            act = self.profile_data.get("activity", {}) or {}
+            today_entry = act.get(today, {"questions": 0, "seconds": 0})
+            q = int(today_entry.get("questions", 0) or 0)
+            secs = int(today_entry.get("seconds", 0) or 0)
+            # format seconds to H:MM
+            h = secs // 3600
+            m = (secs % 3600) // 60
+            if h > 0:
+                timestr = f"{h}h {m}m"
+            else:
+                timestr = f"{m}m"
+            self.profileTodaySummary.setText(f"Today: {q} questions — {timestr}")
+        except Exception:
+            self.profileTodaySummary.setText("")
+        
         for (system_name, drill_name), (lvl_lbl, bar, pct_lbl) in self.profileBuckets.items():
             xp_value = int(self.profile_data["xp"].get(system_name, {}).get(drill_name, 0))
             level, within, cap, pct = self.get_bucket_level_progress(xp_value)
