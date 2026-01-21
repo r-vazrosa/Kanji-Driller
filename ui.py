@@ -703,12 +703,19 @@ class MainWindow(QMainWindow):
         self.drillFilters["prioritize_weakness"] = bool(state == Qt.CheckState.Checked)
 
     def readingtype_changed(self, text):
-        # map UI choice to internal value
         val = "kunyomi" if text.lower().startswith("k") else "onyomi"
         self.reading_type = val
+        try:
+            self.update_count_label()
+        except Exception:
+            pass
 
     def meaningmode_changed(self, text):
         self.meaning_mode = "writing" if text.lower().startswith("w") else "multiple_choice"
+        try:
+            self.update_count_label()
+        except Exception:
+            pass
 
     def filtercount_changed(self, value):
         self.drillFilters["count"] = max(4, int(value))
