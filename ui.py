@@ -1767,6 +1767,20 @@ class MainWindow(QMainWindow):
             self._results_xp_label.setWordWrap(True)
             layout.addWidget(self._results_xp_label)
 
+            self._results_xp_label = QLabel("")
+            self._results_xp_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            self._results_xp_label.setWordWrap(True)
+            layout.addWidget(self._results_xp_label)
+
+            # --- New Session button (starts a new drill with current filters) ---
+            self._results_new_session_btn = QPushButton("New Session")
+            self._results_new_session_btn.setFixedSize(160, 36)
+            # center it under the XP/avg label
+            layout.addWidget(self._results_new_session_btn, alignment=Qt.AlignmentFlag.AlignHCenter)
+
+            # connect to a small helper so behaviour is isolated
+            self._results_new_session_btn.clicked.connect(lambda: self._start_new_session_from_results())
+
             scroll = QScrollArea()
             scroll.setWidgetResizable(True)
             container = QWidget()
@@ -1942,6 +1956,20 @@ class MainWindow(QMainWindow):
 
         self.refresh_profile_page()
 
+    def _start_new_session_from_results(self):
+        """
+        Called from the results page 'New Session' button.
+        Starts a new drill using the currently selected filters (re-uses DrillStart()).
+        """
+        # Close/hide results page and start a new drill in-place
+        # Keep the same filters; DrillStart() will re-evaluate df_f and sample.
+        try:
+            self.DrillStart()
+        except Exception:
+            # fall back to sliding back to the Drill menu if drill fails
+            idx = 1  # drill menu index
+            self.stack.slide_to(idx, "right")
+
     def _on_stack_changed(self, index: int):
         """
         Called when the stacked widget changes page.
@@ -2016,6 +2044,14 @@ class MainWindow(QMainWindow):
                 if btn is not None and btn.isEnabled():
                     is_correct = (btn.text() == getattr(self, "correct_answer_text", ""))
                     self.checkAnswer(is_correct, btn)
+                    return
+        if key in (Qt.Key_Return, Qt.Key_Enter):
+            r_idx = self.results_index()
+            if r_idx is not None and self.stack.currentIndex() == r_idx:
+                btn = getattr(self, "_results_new_session_btn", None)
+                if btn is not None and btn.isEnabled():
+                    # emulate click
+                    btn.click()
                     return
 
         super().keyPressEvent(event)
