@@ -7,10 +7,13 @@ from typing import Optional
 from PySide6.QtWidgets import (
     QApplication, QMessageBox, QGridLayout, QCheckBox, QComboBox, QSpinBox,
     QHBoxLayout, QSizePolicy, QMainWindow, QStackedWidget, QWidget, QPushButton,
-    QVBoxLayout, QLabel, QScrollArea, QFrame, QProgressBar, QFileDialog, QLineEdit
+    QVBoxLayout, QLabel, QScrollArea, QFrame, QProgressBar, QFileDialog, QLineEdit,
+    QDoubleSpinBox
 )
 from PySide6.QtGui import QFont, QPixmap, QPainter, QTextOption, QIcon
 from PySide6.QtCore import Qt, QTimer, QPropertyAnimation, QParallelAnimationGroup, QPoint, QEasingCurve, QRect
+
+import time
 
 try:
     from logic import (
@@ -152,6 +155,9 @@ class MainWindow(QMainWindow):
         self.currentQuestionIndex = 0
         self.totalQuestions = 0
 
+        self.popup_seconds = 1.5
+        self._session_start_avg_prof = None
+
         # session tracking
         self.session_results = []  # list of dicts {kanji, given, expected, correct}
         self.session_xp = {"JLPT": {"Meaning": 0, "Reading": 0}, "WaniKani": {"Meaning": 0, "Reading": 0}}
@@ -204,6 +210,8 @@ class MainWindow(QMainWindow):
                 group.start()
 
         self.stack = SlideStack()
+
+        self.stack.currentChanged.connect(self._on_stack_changed)
 
         # --- Main Menu page ---
         mainMenuLayout = QVBoxLayout()
@@ -334,6 +342,7 @@ class MainWindow(QMainWindow):
 
         DrillMenuCountLayout = QHBoxLayout()
         self.DrillMenuCountLabel = QLabel("Count: (total: " + str(self.drillFilters["max_count"]) + ")")
+        self.DrillMenuCountLabel.setToolTip("Average mastery across all kanji in the current filter and mode. Shown to 3 decimal places.")
         self.DrillMenuCountSpin = QSpinBox()
         self.DrillMenuCountSpin.setRange(4, max(4, self.drillFilters["max_count"]))
         self.DrillMenuCountSpin.setValue(4)
@@ -347,6 +356,27 @@ class MainWindow(QMainWindow):
         self.DrillMenuPrioritizeWeaknessCB.setChecked(bool(self.drillFilters.get("prioritize_weakness", True)))
         self.DrillMenuPrioritizeWeaknessCB.stateChanged.connect(self.prioritizeweakness_changed)
         DrillMenuLayout.addWidget(self.DrillMenuPrioritizeWeaknessCB)
+
+        popup_row = QHBoxLayout()
+        popup_row.setContentsMargins(0, 0, 0, 0)
+        popup_row.setSpacing(6)
+
+        popup_label = QLabel("Popup (s):")
+        popup_spin = QDoubleSpinBox()
+        popup_spin.setRange(0.0, 10.0)
+        popup_spin.setSingleStep(0.1)
+        popup_spin.setDecimals(1)
+        popup_spin.setValue(float(self.popup_seconds))
+        popup_spin.setToolTip("Set how long the answer popup shows (0 = no popup).")
+
+        # store widget ref
+        self.DrillMenuPopupSpin = popup_spin
+        popup_spin.valueChanged.connect(lambda v: setattr(self, "popup_seconds", float(v)))
+
+        popup_row.addWidget(popup_label)
+        popup_row.addWidget(popup_spin)
+        # place it under the checkbox visually (or next to it if you prefer)
+        DrillMenuLayout.addLayout(popup_row)
 
         # JLPT levels row
         self.DrillMenuJLPTSection = QWidget()
@@ -605,7 +635,12 @@ class MainWindow(QMainWindow):
             self.drillFilters["max_count"] = 0
 
         self.drillFilters["max_count"] = int(self.drillFilters["max_count"] or 0)
-        self.DrillMenuCountLabel.setText("Count: (total: " + str(self.drillFilters["max_count"]) + ")")
+
+        # compute average proficiency as a float with 3 decimals
+        avg_prof = self.compute_average_proficiency_for_current_filter()
+        # format as XX.xxx%
+        avg_text = f"{avg_prof:.3f}%"
+        self.DrillMenuCountLabel.setText(f"Count: (total: {self.drillFilters['max_count']}) avg prof: {avg_text}")
 
         max_val = max(4, self.drillFilters["max_count"])
         try:
@@ -900,9 +935,9 @@ class MainWindow(QMainWindow):
         self.update_stats_and_profile(kanji_key, bool(is_correct))
 
         if is_correct:
-            self.show_overlay("Correct!", timeout_ms=1500)
+          self.show_overlay("Correct!")
         else:
-            self.show_overlay(f"Wrong — correct: {expected_display}", timeout_ms=1500)
+            self.show_overlay(f"Wrong — correct: {expected_display}")
 
     # ---------------- question building ----------------
     def NewDrillQuestion(self, type_hint, index, total_count):
@@ -951,6 +986,23 @@ class MainWindow(QMainWindow):
                 base_font.setPointSize(56)
                 qlabel.setFont(base_font)
                 vlayout.addWidget(qlabel)
+
+                try:
+                    kanji_key = str(self.currentRow.get("kanji"))
+                    entry = self.kanji_stats.get(kanji_key, {})
+                    mode_key = self._current_mode_key()
+                    mastery = float(entry.get(self.drillFilters["system"], {}).get(mode_key, {}).get("mastery", 0.0) or 0.0)
+                except Exception:
+                    mastery = 0.0
+                mastery_lbl = QLabel(f"Mastery: {int(round(mastery))}%")
+                mastery_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+                vlayout.addWidget(mastery_lbl)
+
+                tier_names = ["Beginner", "Intermediate", "Expert", "Master", "Grandmaster"]
+                tier_idx = min(4, int(mastery // 20))
+                tier_lbl = QLabel(f"{tier_names[tier_idx]} ({int(round(mastery))}%)")
+                tier_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+                vlayout.addWidget(tier_lbl)
 
                 # input row: textbox + Enter button (right)
                 input_row = QHBoxLayout()
@@ -1156,6 +1208,8 @@ class MainWindow(QMainWindow):
         max_available = len(self.df_f) if self.df_f is not None else 0
         final_count = min(requested, max_available)
 
+        
+
         if final_count < 4:
             QMessageBox.critical(self, "Error", "Require at least 4 cards to start a drill. Pick more cards/levels.")
             return
@@ -1188,6 +1242,10 @@ class MainWindow(QMainWindow):
 
         self.drillFilters["count"] = final_count
         self.totalQuestions = int(self.drillFilters["count"])
+        try:
+            self._session_start_avg_prof = float(self.compute_average_proficiency_for_current_filter() or 0.0)
+        except Exception:
+            self._session_start_avg_prof = 0.0
         if bool(self.drillFilters.get("prioritize_weakness", True)):
             self.currentSample = self.get_pw_weighted_sample(self.df_f, final_count)
         else:
@@ -1237,7 +1295,8 @@ class MainWindow(QMainWindow):
 
         bucket = None
         try:
-            bucket = self.kanji_stats.get(kanji_key, {}).get(system_name, {}).get(drill_name, {})
+            mode_key = self._current_mode_key()
+            bucket = self.kanji_stats.get(kanji_key, {}).get(system_name, {}).get(mode_key, {})
         except Exception:
             bucket = {}
 
@@ -1332,6 +1391,32 @@ class MainWindow(QMainWindow):
                 return getRandomSample(df, n)
             except Exception:
                 return df
+            
+    def compute_average_proficiency_for_current_filter(self):
+        """
+        Compute average mastery (0-100 float) for the currently filtered set (self.df_f)
+        using the current mode key. Returns float rounded to 3 decimals.
+        """
+        if getattr(self, "df_f", None) is None or len(self.df_f) == 0:
+            return 0.0
+        mode_key = self._current_mode_key()
+        total = 0.0
+        count = 0
+        for _, row in self.df_f.iterrows():
+            k = str(row.get("kanji") or "")
+            if not k:
+                continue
+            entry = self.kanji_stats.get(k, {})
+            try:
+                system_blob = entry.get(self.drillFilters["system"], {})
+                bucket = system_blob.get(mode_key, {})
+                m = float(bucket.get("mastery", 0.0) or 0.0)
+            except Exception:
+                m = 0.0
+            total += m
+            count += 1
+        avg = (total / count) if count > 0 else 0.0
+        return float(round(avg, 3))
 
     def showQuestion(self):
         if self.currentQuestionIndex >= self.totalQuestions:
@@ -1389,7 +1474,29 @@ class MainWindow(QMainWindow):
         self._train_overlay_label = msg_label
         overlay.hide()
 
-    def show_overlay(self, text, timeout_ms=1500):
+    def show_overlay(self, text, timeout_ms=None):
+        """
+        Show overlay for `timeout_ms` milliseconds.
+        If timeout_ms is None, use self.popup_seconds * 1000.
+        If that value is 0, skip showing overlay and continue to _advance_after_popup immediately.
+        """
+        # determine timeout
+        if timeout_ms is None:
+            try:
+                t_ms = int(round(float(self.popup_seconds) * 1000.0))
+            except Exception:
+                t_ms = int(round(1500))
+        else:
+            t_ms = int(timeout_ms)
+
+        # if t_ms == 0, skip overlay
+        if t_ms <= 0:
+            # still do the minimal UI feedback (buttons colored) but skip the overlay widget
+            QApplication.processEvents()
+            # small delay optional? we avoid sleeping in UI thread; go straight to advance
+            QTimer.singleShot(0, lambda: self._advance_after_popup())
+            return
+
         self._create_overlay()
         overlay = self._train_overlay
         label = self._train_overlay_label
@@ -1399,8 +1506,7 @@ class MainWindow(QMainWindow):
         overlay.show()
         overlay.repaint()
         QApplication.processEvents()
-        QTimer.singleShot(timeout_ms, lambda: (overlay.hide(), self._advance_after_popup()))
-
+        QTimer.singleShot(t_ms, lambda: (overlay.hide(), self._advance_after_popup()))
     # ---------------- stats/profile updates ----------------
     def ensure_kanji_entry(self, kanji_key):
         def bucket_defaults():
@@ -1412,36 +1518,47 @@ class MainWindow(QMainWindow):
                 "pw_wrong": 0,
                 "pw_streak": 0,
                 "pw_last_seen": 0,
-                "pw_last_seen_session": 0
+                "pw_last_seen_session": 0,
+                "mastery": 0.0,
+                "mastery_streak": 0,
+                "mastery_last_seen": 0
             }
 
+        # If missing entirely, create the whole structure (with mode buckets)
         if kanji_key not in self.kanji_stats:
             self.kanji_stats[kanji_key] = {
                 "total_encounters": 0,
-                "JLPT": {"Meaning": bucket_defaults(), "Reading": bucket_defaults()},
-                "WaniKani": {"Meaning": bucket_defaults(), "Reading": bucket_defaults()}
+                "JLPT": {},
+                "WaniKani": {}
             }
-        else:
-            # normalize existing entry too
-            entry = self.kanji_stats[kanji_key]
-            entry.setdefault("total_encounters", 0)
-            entry.setdefault("JLPT", {})
-            entry.setdefault("WaniKani", {})
-            for sysn in ("JLPT", "WaniKani"):
-                entry.setdefault(sysn, {})
-                for dr in ("Meaning", "Reading"):
-                    entry[sysn].setdefault(dr, {})
-                    b = entry[sysn][dr]
-                    # base fields
+
+        entry = self.kanji_stats[kanji_key]
+        entry.setdefault("total_encounters", 0)
+        entry.setdefault("JLPT", {})
+        entry.setdefault("WaniKani", {})
+
+        # Ensure mode-specific buckets exist for each system, with defaults
+        modes = ["Meaning:writing", "Meaning:multiple_choice", "Reading:kunyomi", "Reading:onyomi"]
+        for sysn in ("JLPT", "WaniKani"):
+            entry.setdefault(sysn, {})
+            for m in modes:
+                if m not in entry[sysn]:
+                    entry[sysn][m] = bucket_defaults().copy()
+                else:
+                    # normalize any missing fields in existing bucket
+                    b = entry[sysn][m]
                     b.setdefault("right", 0)
                     b.setdefault("wrong", 0)
                     b.setdefault("streak", 0)
-                    # pw fields
                     b.setdefault("pw_right", 0)
                     b.setdefault("pw_wrong", 0)
                     b.setdefault("pw_streak", 0)
                     b.setdefault("pw_last_seen", 0)
                     b.setdefault("pw_last_seen_session", 0)
+                    b.setdefault("mastery", 0.0)
+                    b.setdefault("mastery_streak", 0)
+                    b.setdefault("mastery_last_seen", 0)
+
 
 
     def update_stats_and_profile(self, kanji_key, is_correct):
@@ -1452,7 +1569,20 @@ class MainWindow(QMainWindow):
         entry = self.kanji_stats[kanji_key]
         entry["total_encounters"] = int(entry.get("total_encounters", 0)) + 1
 
-        bucket = entry[system_name][drill_name]
+        mode_key = self._current_mode_key()  # e.g., "Meaning:writing" or "Reading:kunyomi"
+        bucket = entry[system_name].setdefault(mode_key, {})
+        # ensure defaults exist (call ensure_kanji_entry already does, but be defensive)
+        bucket.setdefault("right", 0)
+        bucket.setdefault("wrong", 0)
+        bucket.setdefault("streak", 0)
+        bucket.setdefault("pw_right", 0)
+        bucket.setdefault("pw_wrong", 0)
+        bucket.setdefault("pw_streak", 0)
+        bucket.setdefault("pw_last_seen", 0)
+        bucket.setdefault("pw_last_seen_session", 0)
+        bucket.setdefault("mastery", 0.0)
+        bucket.setdefault("mastery_streak", 0)
+        bucket.setdefault("mastery_last_seen", 0)
 
         # ---- always update BASE stats (normal mode tracking) ----
         if is_correct:
@@ -1483,6 +1613,48 @@ class MainWindow(QMainWindow):
             else:
                 bucket["pw_wrong"] = int(bucket.get("pw_wrong", 0)) + 1
                 bucket["pw_streak"] = 0
+
+            try:
+                mastery = float(bucket.get("mastery", 0.0) or 0.0)
+            except Exception:
+                mastery = 0.0
+
+            # lazy decay: apply decay based on question counter age
+            now_q = int(self.profile_data.get("pw_question_counter", 0) or 0)
+            last_seen_q = int(bucket.get("mastery_last_seen", 0) or 0)
+            age = max(0, now_q - last_seen_q)
+            if age > 0:
+                # small decay per 100 questions (tune as you like)
+                decay_per_100q = 1.0  # percent lost per 100 questions not seen
+                decay = (age / 100.0) * decay_per_100q
+                mastery = max(0.0, mastery - decay)
+
+            # apply result-based update
+            if is_correct:
+                # base gains (tweakable): Reading gives slightly more
+                base_gain = 3.5 if drill_name == "Reading" else 2.5
+                # scale gain down as mastery approaches 100
+                gain = base_gain * (1.0 - (mastery / 100.0))
+                # bump streak
+                bucket["mastery_streak"] = int(bucket.get("mastery_streak", 0)) + 1
+                mastery += gain
+                # avoid 99% creep: require a certification streak + minimum encounters to reach 100
+                if mastery >= 99.0:
+                    streak = int(bucket.get("mastery_streak", 0))
+                    total_enc = int(entry.get("total_encounters", 0) or 0)
+                    if streak >= 7 and total_enc >= 25:
+                        mastery = 100.0
+                    else:
+                        # cap at 99.0 if not yet certified
+                        mastery = min(mastery, 99.0)
+            else:
+                # punish mistakes strongly when mastery high
+                penalty = max(12.0, mastery * 0.15)
+                mastery = max(0.0, mastery - penalty)
+                bucket["mastery_streak"] = 0
+
+            bucket["mastery"] = round(float(mastery), 2)
+            bucket["mastery_last_seen"] = int(self.profile_data.get("pw_question_counter", 0) or 0)
 
         # XP stays the same
         gained = self.xp_for_answer(system_name, drill_name, is_correct)
@@ -1522,7 +1694,7 @@ class MainWindow(QMainWindow):
                     clicked_button.setStyleSheet("background-color: lightgreen;")
                 except Exception:
                     pass
-            self.show_overlay("Correct!", timeout_ms=1500)
+            self.show_overlay("Correct!")
         else:
             # highlight the correct one
             for b in getattr(self, "answer_buttons", []):
@@ -1539,7 +1711,7 @@ class MainWindow(QMainWindow):
                     clicked_button.setStyleSheet("background-color: lightcoral;")
                 except Exception:
                     pass
-            self.show_overlay(f"Wrong — correct: {expected_text}", timeout_ms=1500)
+            self.show_overlay(f"Wrong — correct: {expected_text}")
 
     def _advance_after_popup(self):
         self.currentQuestionIndex += 1
@@ -1550,6 +1722,20 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
         self.showQuestion()
+
+    def _current_mode_key(self):
+        """
+        Return a mode key string used for per-mode stats/mastery:
+        - Meaning:writing or Meaning:multiple_choice
+        - Reading:kunyomi or Reading:onyomi
+        """
+        dr = self.drillFilters.get("drill", "Meaning")
+        if dr == "Meaning":
+            mode = "writing" if getattr(self, "meaning_mode", "multiple_choice") == "writing" else "multiple_choice"
+            return f"Meaning:{mode}"
+        else:
+            rt = getattr(self, "reading_type", "kunyomi")
+            return f"Reading:{rt}"
 
     def finishTraining(self):
         self.build_results_page()
@@ -1601,10 +1787,19 @@ class MainWindow(QMainWindow):
         self._results_percent_label.setText(f"{percent}%")
         self._results_count_label.setText(f"{correct_count}/{total} correct")
 
+        try:
+            end_avg = float(self.compute_average_proficiency_for_current_filter() or 0.0)
+        except Exception:
+            end_avg = 0.0
+        start_avg = float(self._session_start_avg_prof or 0.0)
+        delta = end_avg - start_avg
+        sign = "+" if delta >= 0 else "-"
+        delta_text = f"{sign}{abs(delta):.3f}%"
+       
         s = self.drillFilters["system"]
         d = self.drillFilters["drill"]
         gained = int(self.session_xp.get(s, {}).get(d, 0))
-        self._results_xp_label.setText(f"Session XP ({s} / {d}): +{gained}")
+        self._results_xp_label.setText(f"Session XP ({s} / {d}): +{gained}    Filter avg: {end_avg:.3f}% ( {delta_text})")
 
         # clear list
         while self._results_list_layout.count():
@@ -1746,6 +1941,27 @@ class MainWindow(QMainWindow):
             self.stack.addWidget(self._profile_page)
 
         self.refresh_profile_page()
+
+    def _on_stack_changed(self, index: int):
+        """
+        Called when the stacked widget changes page.
+        When returning to the Drill menu (index 1) recompute the filtered df and update the label.
+        """
+        # index 1 is the Drill menu in your current setup
+        if index == 1:
+            # rebuild df_f so update_count_label sees the latest stats/mastery values
+            try:
+                if self.drillFilters["system"] == "JLPT":
+                    self.df_f = filterDataFrame(self.drillFilters["system"], self.drillFilters["jlpt_levels"], self.drillFilters["drill"])
+                else:
+                    self.df_f = filterDataFrame(self.drillFilters["system"], self.drillFilters["wanikani_levels"], self.drillFilters["drill"])
+            except Exception:
+                pass
+            # update label (this will call compute_average_proficiency_for_current_filter)
+            try:
+                self.update_count_label()
+            except Exception:
+                pass
 
     def refresh_profile_page(self):
         if getattr(self, "_profile_page", None) is None:
