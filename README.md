@@ -1,7 +1,7 @@
 KanjiDriller
 # KanjiDriller
 
-KanjiDriller is a desktop application designed to help learners practice **kanji meanings and readings** using **JLPT** or **WaniKani**–style level systems.
+KanjiDriller is a desktop application designed to help learners practice **kanji meanings (multiple choice/writing) and readings (onyomi/kunyomi)** using **JLPT** or **WaniKani**–style level systems.
 
 ## Features
 - Filter kanji by level and list size
@@ -21,6 +21,7 @@ Kanji data is provided by the excellent dataset maintained by
 
 ## Third-Party Licenses
 See THIRD_PARTY_LICENSES.md for licensing information for bundled datasets.
+
 
 
 
