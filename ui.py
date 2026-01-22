@@ -1270,8 +1270,29 @@ class MainWindow(QMainWindow):
 
         self.update_stats_and_profile(kanji_key, bool(is_correct))
 
+        # If correct, show either plain "Correct!" or "Correct! — also: <missed>"
         if is_correct:
-          self.show_overlay("Correct!")
+            # Normalize targets and user input similarly to _is_meaning_input_correct
+            targets = [m.strip().lower() for m in meanings_list if m and str(m).strip()]
+            targets = [t for t in targets if t]
+            raw = str(user_text).strip().lower()
+            user_parts = [p.strip() for p in raw.replace(";", ",").split(",")]
+            user_parts = [p for p in user_parts if p]
+
+            # If user provided multiple parts, treat as set; if single part and it's one of targets,
+            # it's considered correct but we should show the missed ones (i.e. targets - provided)
+            target_set = set(targets)
+            user_set = set(user_parts)
+
+            missed = sorted(list(target_set - user_set))
+
+            if missed:
+                # Show missed meanings (join with comma); keep message short
+                missed_display = ", ".join(missed)
+                self.show_overlay(f"Correct! (Other meanings: {missed_display})")
+            else:
+                # User provided all meanings (or the single meaning matched one target exactly)
+                self.show_overlay("Correct!")
         else:
             self.show_overlay(f"Wrong — correct: {expected_display}")
 
@@ -1324,28 +1345,40 @@ class MainWindow(QMainWindow):
                 vlayout.addWidget(qlabel)
 
                 try:
-                    kanji_key = str(self.currentRow.get("kanji"))
-                    entry = self.kanji_stats.get(kanji_key, {})
+                    kanji_key = str(self.currentRow.get("kanji") or "")
+                    # ensure an entry exists so defaults are present
+                    if kanji_key:
+                        try:
+                            self.ensure_kanji_entry(kanji_key)
+                        except Exception:
+                            pass
+                    entry = self.kanji_stats.get(kanji_key, {}) if kanji_key else {}
                     mode_key = self._current_mode_key()
+                    # internal stored value is still called "mastery"
                     mastery = float(entry.get(self.drillFilters["system"], {}).get(mode_key, {}).get("mastery", 0.0) or 0.0)
                 except Exception:
                     mastery = 0.0
-                mastery_lbl = QLabel(f"Mastery: {int(round(mastery))}%")
-                mastery_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-                vlayout.addWidget(mastery_lbl)
 
-                tier_names = ["Beginner", "Intermediate", "Expert", "Master", "Grandmaster"]
-                tier_idx = min(4, int(mastery // 20))
-                tier_lbl = QLabel(f"{tier_names[tier_idx]} ({int(round(mastery))}%)")
-                tier_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-                vlayout.addWidget(tier_lbl)
+                proficiency_lbl = QLabel(f"Proficiency: {int(round(mastery))}%")
+                proficiency_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+                vlayout.addWidget(proficiency_lbl)
+
+                
+
+                
 
                 # input row: textbox + Enter button (right)
                 input_row = QHBoxLayout()
                 self.meaning_input = QLineEdit()
                 self.meaning_input.setPlaceholderText("Type a meaning…")
                 self.meaning_input.setClearButtonEnabled(True)
-                self.meaning_input.setFocus()
+
+                # ensure it can accept focus
+                self.meaning_input.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+
+                # schedule focus after the widget is shown so slide/animation won't steal it
+                # a small delay (50 ms) is usually robust; 0 ms also often works but can lose with animations
+                QTimer.singleShot(50, lambda: (self.meaning_input.setFocus(), self.meaning_input.selectAll()))
 
                 self.meaning_enter_btn = QPushButton("Enter")
                 self.meaning_enter_btn.setFixedWidth(90)
@@ -1474,6 +1507,19 @@ class MainWindow(QMainWindow):
             base_font.setPointSize(22)
         qlabel.setFont(base_font)
         vlayout.addWidget(qlabel)
+
+        try:
+            kanji_key = str(self.currentRow.get("kanji"))
+            entry = self.kanji_stats.get(kanji_key, {})
+            mode_key = self._current_mode_key()
+            # internal stored value is still called "mastery" — we surface it as "Proficiency"
+            proficiency = float(entry.get(self.drillFilters["system"], {}).get(mode_key, {}).get("mastery", 0.0) or 0.0)
+        except Exception:
+            proficiency = 0.0
+
+        proficiency_lbl = QLabel(f"Proficiency: {int(round(proficiency))}%")
+        proficiency_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        vlayout.addWidget(proficiency_lbl)
 
         answers_widget = QWidget()
         answer_grid = QGridLayout(answers_widget)
