@@ -382,6 +382,13 @@ class MainWindow(QMainWindow):
             "prioritize_weakness": True
         }
 
+        self.jlpt_sublevel_counts = {
+            1: 7,
+            2: 2,
+            3: 2
+        }
+        self.drillFilters.setdefault("jlpt_sublevels", {})
+        self.drillFilters.setdefault("jlpt_levels", [])
         self.kanji_stats = {}
         self.profile_data = {}
         self._results_page = None
@@ -393,7 +400,7 @@ class MainWindow(QMainWindow):
         self.profile_data.setdefault("activity", {})
         self.save_profile()
 
-        self.df_f = filterDataFrame(self.drillFilters["system"], self.drillFilters["jlpt_levels"], self.drillFilters["drill"])
+        self.df_f = self.build_filtered_df()
         self.currentSample = getRandomSample(self.df_f, self.drillFilters["count"])
 
         self.currentRow = None
@@ -538,10 +545,16 @@ class MainWindow(QMainWindow):
         DrillMenuBackLayout.addStretch()
         DrillMenuLayout.addLayout(DrillMenuBackLayout)
 
-        DrillMenuSystemCombo = QComboBox()
-        DrillMenuSystemCombo.addItems(["JLPT", "WaniKani"])
-        DrillMenuSystemCombo.currentTextChanged.connect(self.filtersystem_changed)
-        DrillMenuLayout.addWidget(DrillMenuSystemCombo)
+        self.DrillMenuSystemCombo = QComboBox()
+        self.DrillMenuSystemCombo.addItems(["JLPT", "WaniKani"])
+        try:
+            cur_sys = str(self.drillFilters.get("system", "JLPT"))
+            idx = 0 if cur_sys == "JLPT" else 1
+            self.DrillMenuSystemCombo.setCurrentIndex(idx)
+        except Exception:
+            pass
+        self.DrillMenuSystemCombo.currentTextChanged.connect(self.filtersystem_changed)
+        DrillMenuLayout.addWidget(self.DrillMenuSystemCombo)
 
         DrillMenuDrillCombo = QComboBox()
         DrillMenuDrillCombo.addItems(["Meaning", "Reading"])
@@ -601,55 +614,97 @@ class MainWindow(QMainWindow):
         self.DrillMenuPrioritizeWeaknessCB.stateChanged.connect(self.prioritizeweakness_changed)
         DrillMenuLayout.addWidget(self.DrillMenuPrioritizeWeaknessCB)
 
-
         self.DrillMenuJLPTSection = QWidget()
-        DrillMenuJLPTLayout = QHBoxLayout(self.DrillMenuJLPTSection)
+        jlpt_v = QVBoxLayout(self.DrillMenuJLPTSection)
+        jlpt_v.setAlignment(Qt.AlignmentFlag.AlignTop)
+        jlpt_v.setContentsMargins(0, 0, 0, 0)
+        jlpt_v.setSpacing(20)
 
-        DrillMenuJLPTLevelLabel = QLabel("Level: ")
-        DrillMenuJLPTLevelN5 = QCheckBox("N5")
-        DrillMenuJLPTLevelN4 = QCheckBox("N4")
-        DrillMenuJLPTLevelN3 = QCheckBox("N3")
-        DrillMenuJLPTLevelN2 = QCheckBox("N2")
-        DrillMenuJLPTLevelN1 = QCheckBox("N1")
+        jlpt_label = QLabel("Level:")
+        f = jlpt_label.font()
+        f.setUnderline(True)
+        jlpt_label.setFont(f)
+        jlpt_label.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+        jlpt_v.addWidget(jlpt_label)
 
-        DrillMenuJLPTLevelN5.setChecked(5 in self.drillFilters["jlpt_levels"])
-        DrillMenuJLPTLevelN4.setChecked(4 in self.drillFilters["jlpt_levels"])
-        DrillMenuJLPTLevelN3.setChecked(3 in self.drillFilters["jlpt_levels"])
-        DrillMenuJLPTLevelN2.setChecked(2 in self.drillFilters["jlpt_levels"])
-        DrillMenuJLPTLevelN1.setChecked(1 in self.drillFilters["jlpt_levels"])
+        jlpt_grid_widget = QWidget()
+        jlpt_grid = QGridLayout(jlpt_grid_widget)
+        jlpt_grid.setContentsMargins(0, 0, 0, 0)
+        jlpt_grid.setHorizontalSpacing(6)
+        jlpt_grid.setVerticalSpacing(20)
 
-        for cb in (DrillMenuJLPTLevelN5, DrillMenuJLPTLevelN4, DrillMenuJLPTLevelN3, DrillMenuJLPTLevelN2, DrillMenuJLPTLevelN1):
+        self._jlpt_base_checkboxes = {}
+        self._jlpt_sub_checkboxes = {}
+
+        levels_order = []
+        levels_order.append((5, None))
+        levels_order.append((4, None))
+        for si in range(1, self.jlpt_sublevel_counts.get(3, 1) + 1):
+            levels_order.append((3, si))
+        for si in range(1, self.jlpt_sublevel_counts.get(2, 1) + 1):
+            levels_order.append((2, si))
+        for si in range(1, self.jlpt_sublevel_counts.get(1, 1) + 1):
+            levels_order.append((1, si))
+
+        cols = 5
+        for idx, (base, sub) in enumerate(levels_order):
+            r = idx // cols
+            c = idx % cols
+            text = f"N{base}" if sub is None else f"N{base}.{sub}"
+            cb = QCheckBox(text)
             cb.stateChanged.connect(self.level_filter)
+            if sub is None:
+                cb.setChecked(base in self.drillFilters.get("jlpt_levels", []))
+                self._jlpt_base_checkboxes[base] = cb
+            else:
+                existing = self.drillFilters.get("jlpt_sublevels", {}).get(base)
+                if existing and sub in existing:
+                    cb.setChecked(True)
+                self._jlpt_sub_checkboxes[(base, sub)] = cb
+            jlpt_grid.addWidget(cb, r, c)
 
-        DrillMenuJLPTLayout.addWidget(DrillMenuJLPTLevelLabel)
-        DrillMenuJLPTLayout.addWidget(DrillMenuJLPTLevelN5)
-        DrillMenuJLPTLayout.addWidget(DrillMenuJLPTLevelN4)
-        DrillMenuJLPTLayout.addWidget(DrillMenuJLPTLevelN3)
-        DrillMenuJLPTLayout.addWidget(DrillMenuJLPTLevelN2)
-        DrillMenuJLPTLayout.addWidget(DrillMenuJLPTLevelN1)
-
+        jlpt_v.addWidget(jlpt_grid_widget)
         DrillMenuLayout.addWidget(self.DrillMenuJLPTSection)
 
         self.DrillMenuWaniKaniSection = QWidget()
-        DrillMenuWaniKaniLayout = QGridLayout(self.DrillMenuWaniKaniSection)
-        DrillMenuWaniKaniLayout.setSpacing(6)
-        DrillMenuWaniKaniLayout.setContentsMargins(0, 0, 0, 0)
+        wk_v = QVBoxLayout(self.DrillMenuWaniKaniSection)
+        wk_v.setAlignment(Qt.AlignmentFlag.AlignTop)
+        wk_v.setContentsMargins(0, 0, 0, 0)
+        wk_v.setSpacing(20)
 
-        DrillMenuWaniKaniLevelLabel = QLabel("Level:")
-        DrillMenuWaniKaniLayout.addWidget(DrillMenuWaniKaniLevelLabel, 0, 0, 1, 1, Qt.AlignmentFlag.AlignLeft)
+        wk_label = QLabel("Level:")
+        f = wk_label.font()
+        f.setUnderline(True)
+        wk_label.setFont(f)
+        wk_label.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+        wk_v.addWidget(wk_label)
 
-        columns = 9
+        wk_grid_widget = QWidget()
+        wk_grid = QGridLayout(wk_grid_widget)
+        wk_grid.setHorizontalSpacing(5)
+        wk_grid.setVerticalSpacing(12)
+        wk_grid.setContentsMargins(0, 0, 0, 0)
+
+        columns = 10
         start_col = 1
         for i in range(1, 61):
             checkbox = QCheckBox(str(i))
             checkbox.stateChanged.connect(self.level_filter)
             index = i - 1
             row = index // columns
-            col = start_col + (index % columns)
-            DrillMenuWaniKaniLayout.addWidget(checkbox, row, col)
+            col = index % columns
+            wk_grid.addWidget(checkbox, row, col)
 
+        wk_v.addWidget(wk_grid_widget)
         DrillMenuLayout.addWidget(self.DrillMenuWaniKaniSection)
         self.DrillMenuWaniKaniSection.hide()
+
+        if self.drillFilters.get("system", "JLPT") == "WaniKani":
+            self.DrillMenuJLPTSection.hide()
+            self.DrillMenuWaniKaniSection.show()
+        else:
+            self.DrillMenuJLPTSection.show()
+            self.DrillMenuWaniKaniSection.hide()
 
         mainMenuDrillButton = QPushButton("Drill")
         mainMenuDrillButton.clicked.connect(lambda: self.DrillStart())
@@ -853,22 +908,43 @@ class MainWindow(QMainWindow):
             pass
 
     def filtersystem_changed(self, text):
-        self.drillFilters["system"] = text
-        if self.drillFilters["system"] == "JLPT":
-            self.DrillMenuJLPTSection.show()
-            self.DrillMenuWaniKaniSection.hide()
-        else:
-            self.DrillMenuJLPTSection.hide()
-            self.DrillMenuWaniKaniSection.show()
-        if self.drillFilters["system"] == "JLPT":
-            self.df_f = filterDataFrame(self.drillFilters["system"], self.drillFilters["jlpt_levels"], self.drillFilters["drill"])
-        else:
-            self.df_f = filterDataFrame(self.drillFilters["system"], self.drillFilters["wanikani_levels"], self.drillFilters["drill"])
+        self.drillFilters["system"] = str(text)
+
         try:
-            self.drillFilters["max_count"] = getMaxCount(self.drillFilters["system"], self.drillFilters["jlpt_levels"], self.drillFilters["drill"])
+            if self.drillFilters["system"] == "WaniKani":
+                self.DrillMenuJLPTSection.hide()
+                self.DrillMenuWaniKaniSection.show()
+            else:
+                self.DrillMenuWaniKaniSection.hide()
+                self.DrillMenuJLPTSection.show()
         except Exception:
             pass
-        self.update_count_label()
+
+        if self.drillFilters.get("drill", "Meaning") == "Reading":
+            self.DrillMenuReadingTypeCombo.show()
+        else:
+            self.DrillMenuReadingTypeCombo.hide()
+
+        if self.drillFilters.get("drill", "Meaning") == "Meaning":
+            self.DrillMenuMeaningModeCombo.show()
+        else:
+            self.DrillMenuMeaningModeCombo.hide()
+
+        try:
+            self.df_f = self.build_filtered_df()
+        except Exception:
+            try:
+                if self.drillFilters["system"] == "JLPT":
+                    self.df_f = filterDataFrame("JLPT", self.drillFilters.get("jlpt_levels", []), self.drillFilters.get("drill", "Meaning"))
+                else:
+                    self.df_f = filterDataFrame("WaniKani", self.drillFilters.get("wanikani_levels", []), self.drillFilters.get("drill", "Meaning"))
+            except Exception:
+                self.df_f = None
+
+        try:
+            self.update_count_label()
+        except Exception:
+            pass
 
     def filterdrill_changed(self, text):
         self.drillFilters["drill"] = text
@@ -883,9 +959,9 @@ class MainWindow(QMainWindow):
             self.DrillMenuMeaningModeCombo.hide()
 
         if self.drillFilters["system"] == "JLPT":
-            self.df_f = filterDataFrame(self.drillFilters["system"], self.drillFilters["jlpt_levels"], self.drillFilters["drill"])
+            self.df_f = self.build_filtered_df()
         else:
-            self.df_f = filterDataFrame(self.drillFilters["system"], self.drillFilters["wanikani_levels"], self.drillFilters["drill"])
+            self.df_f = self.build_filtered_df()
         try:
             self.drillFilters["max_count"] = getMaxCount(self.drillFilters["system"], self.drillFilters["jlpt_levels"], self.drillFilters["drill"])
         except Exception:
@@ -920,31 +996,79 @@ class MainWindow(QMainWindow):
         text = sender.text()
         checked = sender.isChecked()
         if self.drillFilters["system"] == "JLPT":
-            try:
-                val = int(text.lstrip("Nn"))
-            except Exception:
+            if text.lower().startswith("n"):
+                parts = text.lstrip("Nn").split(".")
+                try:
+                    base = int(parts[0])
+                except Exception:
+                    return
+                jlpt_levels = self.drillFilters.setdefault("jlpt_levels", [])
+                if len(parts) == 1:
+                    if checked:
+                        if base not in jlpt_levels:
+                            jlpt_levels.append(base)
+                    else:
+                        if base in jlpt_levels:
+                            jlpt_levels.remove(base)
+                        self.drillFilters.setdefault("jlpt_sublevels", {}).pop(base, None)
+                        for si in range(1, self.jlpt_sublevel_counts.get(base, 1) + 1):
+                            cb = self._jlpt_sub_checkboxes.get((base, si))
+                            if cb:
+                                try:
+                                    cb.blockSignals(True)
+                                    cb.setChecked(False)
+                                finally:
+                                    cb.blockSignals(False)
+                else:
+                    try:
+                        subidx = int(parts[1])
+                    except Exception:
+                        return
+                    submap = self.drillFilters.setdefault("jlpt_sublevels", {})
+                    sset = submap.setdefault(base, set())
+                    if checked:
+                        sset.add(subidx)
+                        if base not in jlpt_levels:
+                            jlpt_levels.append(base)
+                            base_cb = self._jlpt_base_checkboxes.get(base)
+                            if base_cb:
+                                try:
+                                    base_cb.blockSignals(True)
+                                    base_cb.setChecked(True)
+                                finally:
+                                    base_cb.blockSignals(False)
+                    else:
+                        if subidx in sset:
+                            sset.discard(subidx)
+                        if not sset:
+                            submap.pop(base, None)
+                try:
+                    self.df_f = self.build_filtered_df()
+                except Exception:
+                    try:
+                        self.df_f = filterDataFrame(self.drillFilters["system"], self.drillFilters["jlpt_levels"], self.drillFilters["drill"])
+                    except Exception:
+                        self.df_f = None
+                self.update_count_label()
                 return
-            lst = self.drillFilters.setdefault("jlpt_levels", [])
-            if checked:
-                if val not in lst:
-                    lst.append(val)
-            else:
-                if val in lst:
-                    lst.remove(val)
-            self.df_f = filterDataFrame(self.drillFilters["system"], self.drillFilters["jlpt_levels"], self.drillFilters["drill"])
+        try:
+            val = int(text)
+        except Exception:
+            return
+        lst = self.drillFilters.setdefault("wanikani_levels", [])
+        if checked:
+            if val not in lst:
+                lst.append(val)
         else:
+            if val in lst:
+                lst.remove(val)
+        try:
+            self.df_f = self.build_filtered_df()
+        except Exception:
             try:
-                val = int(text)
+                self.df_f = filterDataFrame(self.drillFilters["system"], self.drillFilters["wanikani_levels"], self.drillFilters["drill"])
             except Exception:
-                return
-            lst = self.drillFilters.setdefault("wanikani_levels", [])
-            if checked:
-                if val not in lst:
-                    lst.append(val)
-            else:
-                if val in lst:
-                    lst.remove(val)
-            self.df_f = filterDataFrame(self.drillFilters["system"], self.drillFilters["wanikani_levels"], self.drillFilters["drill"])
+                self.df_f = None
         self.update_count_label()
 
     def _start_session_timer(self):
@@ -954,6 +1078,62 @@ class MainWindow(QMainWindow):
         except Exception:
             self._session_timer_start = None
             self._session_accum_seconds = 0.0
+
+    def _slice_df_into_subgroups(self, df_level, group_count, subindex):
+        import pandas as pd
+        if df_level is None or getattr(df_level, "shape", (0, 0))[0] == 0:
+            return df_level.iloc[0:0].copy()
+        n = int(df_level.shape[0])
+        base = n // group_count
+        rem = n % group_count
+        idx = subindex - 1
+        start = idx * base + min(idx, rem)
+        size = base + (1 if idx < rem else 0)
+        return df_level.iloc[start:start + size].copy()
+
+    def build_filtered_df(self):
+        import pandas as pd
+        system = self.drillFilters.get("system", "JLPT")
+        drill = self.drillFilters.get("drill", "Meaning")
+        if system != "JLPT":
+            try:
+                return filterDataFrame(system, self.drillFilters.get("wanikani_levels", []), drill)
+            except Exception:
+                try:
+                    return filterDataFrame(system, self.drillFilters.get("wanikani_levels", []), drill)
+                except Exception:
+                    return pd.DataFrame()
+        result_parts = []
+        jlpt_levels = list(sorted(set(self.drillFilters.get("jlpt_levels", [])), reverse=False))
+        if not jlpt_levels:
+            return pd.DataFrame()
+        for base in jlpt_levels:
+            try:
+                level_df = filterDataFrame("JLPT", [base], drill)
+            except Exception:
+                try:
+                    level_df = filterDataFrame("JLPT", [base], drill)
+                except Exception:
+                    level_df = None
+            if level_df is None or getattr(level_df, "shape", (0, 0))[0] == 0:
+                continue
+            group_count = self.jlpt_sublevel_counts.get(base, 1)
+            selected_subs = sorted(list(self.drillFilters.get("jlpt_sublevels", {}).get(base, set())))
+            if group_count == 1:
+                result_parts.append(level_df.copy())
+            else:
+                if selected_subs:
+                    for subidx in selected_subs:
+                        if subidx < 1 or subidx > group_count:
+                            continue
+                        slice_df = self._slice_df_into_subgroups(level_df, group_count, subidx)
+                        result_parts.append(slice_df)
+                else:
+                    result_parts.append(level_df.copy())
+        if not result_parts:
+            return pd.DataFrame()
+        combined = pd.concat(result_parts, ignore_index=True)
+        return combined
 
     def _stop_session_timer_and_record(self):
         try:
@@ -1441,13 +1621,13 @@ class MainWindow(QMainWindow):
 
     def DrillStart(self):
         if self.drillFilters["max_count"] < 1:
-            QMessageBox.critical(self, "Error", "No cards avaliable, choose atleast a level")
+            QMessageBox.critical(self, "Error", "No cards available — choose at least one level.")
             return
 
         if self.drillFilters["system"] == "JLPT":
-            self.df_f = filterDataFrame(self.drillFilters["system"], self.drillFilters["jlpt_levels"], self.drillFilters["drill"])
+            self.df_f = self.build_filtered_df()
         else:
-            self.df_f = filterDataFrame(self.drillFilters["system"], self.drillFilters["wanikani_levels"], self.drillFilters["drill"])
+            self.df_f = self.build_filtered_df()
 
         requested = int(self.drillFilters.get("count", 4) or 4)
         requested = max(4, requested)
@@ -2411,9 +2591,9 @@ class MainWindow(QMainWindow):
         if index == 1:
             try:
                 if self.drillFilters["system"] == "JLPT":
-                    self.df_f = filterDataFrame(self.drillFilters["system"], self.drillFilters["jlpt_levels"], self.drillFilters["drill"])
+                    self.df_f = self.build_filtered_df()
                 else:
-                    self.df_f = filterDataFrame(self.drillFilters["system"], self.drillFilters["wanikani_levels"], self.drillFilters["drill"])
+                    self.df_f = self.build_filtered_df()
             except Exception:
                 pass
             try:
