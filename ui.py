@@ -1270,31 +1270,14 @@ class MainWindow(QMainWindow):
 
         self.update_stats_and_profile(kanji_key, bool(is_correct))
 
-        # If correct, show either plain "Correct!" or "Correct! — also: <missed>"
+        # Show overlay: first line says Correct/Wrong (colored), second line lists canonical correct answers.
         if is_correct:
-            # Normalize targets and user input similarly to _is_meaning_input_correct
-            targets = [m.strip().lower() for m in meanings_list if m and str(m).strip()]
-            targets = [t for t in targets if t]
-            raw = str(user_text).strip().lower()
-            user_parts = [p.strip() for p in raw.replace(";", ",").split(",")]
-            user_parts = [p for p in user_parts if p]
-
-            # If user provided multiple parts, treat as set; if single part and it's one of targets,
-            # it's considered correct but we should show the missed ones (i.e. targets - provided)
-            target_set = set(targets)
-            user_set = set(user_parts)
-
-            missed = sorted(list(target_set - user_set))
-
-            if missed:
-                # Show missed meanings (join with comma); keep message short
-                missed_display = ", ".join(missed)
-                self.show_overlay(f"Correct! (Other meanings: {missed_display})")
-            else:
-                # User provided all meanings (or the single meaning matched one target exactly)
-                self.show_overlay("Correct!")
+            # Always show canonical expected answers under the green "Correct" header.
+            self.show_overlay(is_correct=True, answers=expected_display)
         else:
-            self.show_overlay(f"Wrong — correct: {expected_display}")
+            # Wrong: show red "Wrong" and then the expected answers under it.
+            self.show_overlay(is_correct=False, answers=expected_display)
+
 
     # ---------------- question building ----------------
     def NewDrillQuestion(self, type_hint, index, total_count):
@@ -1861,12 +1844,7 @@ class MainWindow(QMainWindow):
         self._train_overlay_label = msg_label
         overlay.hide()
 
-    def show_overlay(self, text, timeout_ms=None):
-        """
-        Show overlay for `timeout_ms` milliseconds.
-        If timeout_ms is None, use self.popup_seconds * 1000.
-        If that value is 0, skip showing overlay and continue to _advance_after_popup immediately.
-        """
+    def show_overlay(self, text=None, timeout_ms=None, is_correct: Optional[bool] = None, answers: Optional[str] = None):
         # determine timeout
         if timeout_ms is None:
             try:
@@ -1878,16 +1856,39 @@ class MainWindow(QMainWindow):
 
         # if t_ms == 0, skip overlay
         if t_ms <= 0:
-            # still do the minimal UI feedback (buttons colored) but skip the overlay widget
             QApplication.processEvents()
-            # small delay optional? we avoid sleeping in UI thread; go straight to advance
             QTimer.singleShot(0, lambda: self._advance_after_popup())
             return
 
         self._create_overlay()
         overlay = self._train_overlay
         label = self._train_overlay_label
-        label.setText(text)
+
+        # Build HTML content: colored first line (Correct/Wrong) + answers underneath.
+        if is_correct is None:
+            # Legacy single-line behavior (preserve existing plain-text usage)
+            safe_text = (text or "")
+            html = f"<div style='white-space:pre-wrap;'>{safe_text}</div>"
+        else:
+            # first line: Correct / Wrong
+            if is_correct:
+                first = "<div style='color: #0b8f3b; font-weight:700; font-size:28px; margin-bottom:6px;'>Correct</div>"
+            else:
+                first = "<div style='color: #d54e4e; font-weight:700; font-size:28px; margin-bottom:6px;'>Wrong</div>"
+
+            # second line: answers (if provided), keep slightly smaller and readable
+            ans_text = answers if answers is not None else (text or "")
+            # escape minimal HTML-sensitive chars to avoid accidental markup (basic)
+            if ans_text is None:
+                ans_text = ""
+            # show answers in a block with wrapping
+            second = f"<div style='color: white; font-size:18px; white-space:pre-wrap;'>{ans_text}</div>"
+
+            html = first + second
+
+        label.setTextFormat(Qt.RichText)
+        label.setText(html)
+
         overlay.setGeometry(self.TrainMainWidget.rect())
         overlay.raise_()
         overlay.show()
@@ -2079,14 +2080,15 @@ class MainWindow(QMainWindow):
         # update stats/profile
         self.update_stats_and_profile(kanji_key, bool(is_correct))
 
-        # visual feedback
+        # visual feedback + overlay
         if is_correct:
             if clicked_button is not None:
                 try:
                     clicked_button.setStyleSheet("background-color: lightgreen;")
                 except Exception:
                     pass
-            self.show_overlay("Correct!")
+            # show green "Correct" + expected answers underneath
+            self.show_overlay(is_correct=True, answers=expected_text)
         else:
             # highlight the correct one
             for b in getattr(self, "answer_buttons", []):
@@ -2103,7 +2105,9 @@ class MainWindow(QMainWindow):
                     clicked_button.setStyleSheet("background-color: lightcoral;")
                 except Exception:
                     pass
-            self.show_overlay(f"Wrong — correct: {expected_text}")
+            # show red "Wrong" + expected answers underneath
+            self.show_overlay(is_correct=False, answers=expected_text)
+
 
     def _advance_after_popup(self):
         self.currentQuestionIndex += 1
