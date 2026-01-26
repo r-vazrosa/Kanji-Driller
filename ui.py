@@ -2381,8 +2381,15 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "Repeat Failures", "No matching failed kanji found in the current filter set.")
             return
 
-        self.currentSample = df_failures.copy()
-        self.drillFilters["count"] = int(max(1, len(self.currentSample)))
+        try:
+            import copy
+            if not hasattr(self, "_saved_drillFilters_for_repeat_failures"):
+                self._saved_drillFilters_for_repeat_failures = copy.deepcopy(self.drillFilters)
+        except Exception:
+            self._saved_drillFilters_for_repeat_failures = dict(self.drillFilters)
+
+        self.currentSample = df_failures.copy().reset_index(drop=True)
+
         self.totalQuestions = int(len(self.currentSample))
         self.currentQuestionIndex = 0
         self.session_results = []
