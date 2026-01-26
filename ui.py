@@ -1272,12 +1272,34 @@ class MainWindow(QMainWindow):
 
         # Show overlay: first line says Correct/Wrong (colored), second line lists canonical correct answers.
         if is_correct:
-            # Always show canonical expected answers under the green "Correct" header.
-            self.show_overlay(is_correct=True, answers=expected_display)
-        else:
-            # Wrong: show red "Wrong" and then the expected answers under it.
-            self.show_overlay(is_correct=False, answers=expected_display)
+            # Normalize targets
+            targets = [m.strip().lower() for m in meanings_list if m and str(m).strip()]
 
+            # Normalize user input
+            raw = str(user_text).strip().lower()
+            user_parts = [p.strip() for p in raw.replace(";", ",").split(",")]
+            user_parts = [p for p in user_parts if p]
+
+            # Compute missed meanings
+            missed = sorted(set(targets) - set(user_parts))
+
+            if missed:
+                missed_display = ", ".join(missed)
+                # Partial correct: green label but different text
+                self.show_overlay(
+                    text="Partially correct",
+                    is_correct=True,
+                    answers=missed_display
+                )
+            else:
+                # Fully correct
+                self.show_overlay(
+                    text="Correct",
+                    is_correct=True,
+                    answers=""
+                )
+        else:
+            self.show_overlay(is_correct=False, answers=expected_display)
 
     # ---------------- question building ----------------
     def NewDrillQuestion(self, type_hint, index, total_count):
@@ -1845,16 +1867,31 @@ class MainWindow(QMainWindow):
         overlay.hide()
 
     def show_overlay(self, text=None, timeout_ms=None, is_correct: Optional[bool] = None, answers: Optional[str] = None):
+
+        # small HTML escape helper
+        def _esc(s):
+            if s is None:
+                return ""
+            return (str(s)
+                    .replace("&", "&amp;")
+                    .replace("<", "&lt;")
+                    .replace(">", "&gt;")
+                    .replace('"', "&quot;")
+                    .replace("'", "&#39;"))
+
         # determine timeout
         if timeout_ms is None:
             try:
                 t_ms = int(round(float(self.popup_seconds) * 1000.0))
             except Exception:
-                t_ms = int(round(1500))
+                t_ms = 1500
         else:
-            t_ms = int(timeout_ms)
+            try:
+                t_ms = int(timeout_ms)
+            except Exception:
+                t_ms = 1500
 
-        # if t_ms == 0, skip overlay
+        # if t_ms == 0, skip overlay and advance immediately
         if t_ms <= 0:
             QApplication.processEvents()
             QTimer.singleShot(0, lambda: self._advance_after_popup())
@@ -1864,27 +1901,31 @@ class MainWindow(QMainWindow):
         overlay = self._train_overlay
         label = self._train_overlay_label
 
-        # Build HTML content: colored first line (Correct/Wrong) + answers underneath.
+        # Build HTML content
         if is_correct is None:
-            # Legacy single-line behavior (preserve existing plain-text usage)
-            safe_text = (text or "")
-            html = f"<div style='white-space:pre-wrap;'>{safe_text}</div>"
+            # Legacy single-block plain text behavior
+            safe_text = _esc(text or "")
+            html = f"<div style='white-space:pre-wrap; font-size:18px; color: white;'>{safe_text}</div>"
         else:
-            # first line: Correct / Wrong
-            if is_correct:
-                first = "<div style='color: #0b8f3b; font-weight:700; font-size:28px; margin-bottom:6px;'>Correct</div>"
+            # Decide first-line verdict text: prefer explicit `text` if provided
+            verdict_raw = text if text is not None else ("Correct" if is_correct else "Wrong")
+            verdict = _esc(verdict_raw)
+
+            # color: green for correct/partial correct, red for wrong
+            color = "#0b8f3b" if is_correct else "#d54e4e"
+
+            # Increase verdict font-size by 4px (was 28px)
+            first = f"<div style='color:{color}; font-weight:700; font-size:32px; margin-bottom:6px;'>{verdict}</div>"
+
+            # Decide answers text: use `answers` if provided; if not, avoid repeating verdict
+            if answers is not None and str(answers).strip() != "":
+                ans_text = _esc(answers)
+                # show answers in white block (only if non-empty)
+                ans_html = f"<div style='color: white; font-size:16px; white-space:pre-wrap;'>{ans_text}</div>"
             else:
-                first = "<div style='color: #d54e4e; font-weight:700; font-size:28px; margin-bottom:6px;'>Wrong</div>"
+                ans_html = ""  # no second-line at all
 
-            # second line: answers (if provided), keep slightly smaller and readable
-            ans_text = answers if answers is not None else (text or "")
-            # escape minimal HTML-sensitive chars to avoid accidental markup (basic)
-            if ans_text is None:
-                ans_text = ""
-            # show answers in a block with wrapping
-            second = f"<div style='color: white; font-size:18px; white-space:pre-wrap;'>{ans_text}</div>"
-
-            html = first + second
+            html = first + ans_html
 
         label.setTextFormat(Qt.RichText)
         label.setText(html)
@@ -1895,6 +1936,8 @@ class MainWindow(QMainWindow):
         overlay.repaint()
         QApplication.processEvents()
         QTimer.singleShot(t_ms, lambda: (overlay.hide(), self._advance_after_popup()))
+
+
     # ---------------- stats/profile updates ----------------
     def ensure_kanji_entry(self, kanji_key):
         def bucket_defaults():
