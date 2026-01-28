@@ -878,12 +878,13 @@ class MainWindow(QMainWindow):
             levels = self.drillFilters["wanikani_levels"]
 
         try:
-            self.drillFilters["max_count"] = getMaxCount(self.df_f, self.drillFilters["system"], levels, self.drillFilters["drill"])
-        except TypeError:
-            try:
-                self.drillFilters["max_count"] = getMaxCount(self.drillFilters["system"], levels, self.drillFilters["drill"])
-            except Exception:
-                self.drillFilters["max_count"] = 0
+            if getattr(self, "df_f", None) is not None:
+                self.drillFilters["max_count"] = int(getattr(self.df_f, "shape", (0, 0))[0])
+            else:
+                try:
+                    self.drillFilters["max_count"] = int(getMaxCount(self.drillFilters["system"], levels, self.drillFilters["drill"]))
+                except Exception:
+                    self.drillFilters["max_count"] = 0
         except Exception:
             self.drillFilters["max_count"] = 0
 
@@ -1025,9 +1026,15 @@ class MainWindow(QMainWindow):
                     except Exception:
                         return
                     submap = self.drillFilters.setdefault("jlpt_sublevels", {})
-                    sset = submap.setdefault(base, set())
+                    slist = submap.setdefault(base, [])
+                    # ensure it's a list (in case older data used sets)
+                    if isinstance(slist, set):
+                        slist = list(slist)
+                        submap[base] = slist
+
                     if checked:
-                        sset.add(subidx)
+                        if subidx not in slist:
+                            slist.append(subidx)
                         if base not in jlpt_levels:
                             jlpt_levels.append(base)
                             base_cb = self._jlpt_base_checkboxes.get(base)
@@ -1038,10 +1045,26 @@ class MainWindow(QMainWindow):
                                 finally:
                                     base_cb.blockSignals(False)
                     else:
-                        if subidx in sset:
-                            sset.discard(subidx)
-                        if not sset:
+                        if subidx in slist:
+                            try:
+                                slist.remove(subidx)
+                            except ValueError:
+                                pass
+
+                        if not slist:
                             submap.pop(base, None)
+                            try:
+                                if base in jlpt_levels:
+                                    jlpt_levels.remove(base)
+                                    base_cb = self._jlpt_base_checkboxes.get(base)
+                                    if base_cb:
+                                        try:
+                                            base_cb.blockSignals(True)
+                                            base_cb.setChecked(False)
+                                        finally:
+                                            base_cb.blockSignals(False)
+                            except Exception:
+                                pass
                 try:
                     self.df_f = self.build_filtered_df()
                 except Exception:
@@ -1118,7 +1141,13 @@ class MainWindow(QMainWindow):
             if level_df is None or getattr(level_df, "shape", (0, 0))[0] == 0:
                 continue
             group_count = self.jlpt_sublevel_counts.get(base, 1)
-            selected_subs = sorted(list(self.drillFilters.get("jlpt_sublevels", {}).get(base, set())))
+            selected_subs = self.drillFilters.get("jlpt_sublevels", {}).get(base, [])
+            if selected_subs is None:
+                selected_subs = []
+            try:
+                selected_subs = sorted(int(x) for x in list(selected_subs))
+            except Exception:
+                selected_subs = []
             if group_count == 1:
                 result_parts.append(level_df.copy())
             else:
@@ -2044,9 +2073,18 @@ class MainWindow(QMainWindow):
 
             now_q = int(self.profile_data.get("pw_question_counter", 0) or 0)
             last_seen_q = int(bucket.get("mastery_last_seen", 0) or 0)
-            age = max(0, now_q - last_seen_q)
-            if age > 0:
-                decay_per_100q = 1.0
+
+            age = 0
+            if last_seen_q > 0:
+                age = max(0, now_q - last_seen_q)
+
+            MIN_AGE_FOR_DECAY = 20
+            if age >= MIN_AGE_FOR_DECAY:
+                if age < 200:
+                    decay_per_100q = 0.5
+                else:
+                    decay_per_100q = 1.0
+
                 decay = (age / 100.0) * decay_per_100q
                 mastery = max(0.0, mastery - decay)
 
